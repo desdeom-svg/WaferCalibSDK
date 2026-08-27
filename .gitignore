@@ -1,0 +1,55 @@
+# ====================================================================
+# WaferCalibSDK Git Ignore Configuration
+# ====================================================================
+
+# CMake & 编译中间产物
+build/
+bin/
+obj/
+*.dir/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# 编译生成的二进制文件 (DLL, LIB, EXE, PDB 等)
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.pdb
+*.idb
+*.exp
+*.ilk
+
+# 常用 IDE & 编辑器配置缓存
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# 大型测试图像与临时生成物
+tmp/
+output/
+images/
+tools/*.bmp
+tools/*.png
+tools/*.jpg
+*.bmp
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 操作系统缓存
+Thumbs.db
+Desktop.ini
+.DS_Store

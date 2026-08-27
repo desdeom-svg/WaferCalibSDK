@@ -1,0 +1,12 @@
+{
+  "schema": "line_scan_x_quadratic_only_v1",
+  "input_width": 11008,
+  "input_height": 2000,
+  "input_type": "BGR8",
+  "point_spacing_mm": 5,
+  "source_x": [279.70632634018472, 500.0555351073524, -0.060453586876361376],
+  "output_origin_x": 279.70632634018472,
+  "output_pitch_pixels": 498.78600978294867,
+  "affine_x_rms_pixels": 2.1852181887736539,
+  "fitted_x_rms_pixels": 0.41935637798875497
+}
