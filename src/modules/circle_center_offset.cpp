@@ -14,32 +14,33 @@ struct CircleCandidate {
     double cy = 0.0;
     double r = 0.0;
     double circularity = 0.0;
+    double inlier_ratio = 1.0;
     double rms = 0.0;
+    double edge_energy = 0.0;
     double score = 0.0;
     std::vector<cv::Point> contour;
     bool is_bright = true;
 };
 
-// 代数圆拟合 (最小二乘法: x^2 + y^2 + a*x + b*y + c = 0)
-bool fitCircleAlgebraic(
-    const std::vector<cv::Point>& contour,
+// 基础最小二乘代数圆拟合 (Kåsa 方法: x^2 + y^2 + a*x + b*y + c = 0)
+bool fitCircleLeastSquares(
+    const std::vector<cv::Point>& points,
     double& out_cx,
     double& out_cy,
     double& out_r,
     double& out_rms
 ) {
-    const size_t point_count = contour.size();
+    const size_t point_count = points.size();
     if (point_count < 5) {
         return false;
     }
 
-    // 构造超定方程组 A * [a, b, c]^T = B
     cv::Mat mat_a(static_cast<int>(point_count), 3, CV_64F);
     cv::Mat mat_b(static_cast<int>(point_count), 1, CV_64F);
 
     for (size_t i = 0; i < point_count; ++i) {
-        const double x = static_cast<double>(contour[i].x);
-        const double y = static_cast<double>(contour[i].y);
+        const double x = static_cast<double>(points[i].x);
+        const double y = static_cast<double>(points[i].y);
         mat_a.at<double>(static_cast<int>(i), 0) = x;
         mat_a.at<double>(static_cast<int>(i), 1) = y;
         mat_a.at<double>(static_cast<int>(i), 2) = 1.0;
@@ -69,17 +70,131 @@ bool fitCircleAlgebraic(
     out_cy = center_y;
     out_r = radius;
 
-    // 计算几何残差 RMS
     double sum_sq_err = 0.0;
     for (size_t i = 0; i < point_count; ++i) {
-        const double dx = contour[i].x - center_x;
-        const double dy = contour[i].y - center_y;
+        const double dx = points[i].x - center_x;
+        const double dy = points[i].y - center_y;
         const double dist = std::sqrt(dx * dx + dy * dy);
         const double err = dist - radius;
         sum_sq_err += err * err;
     }
 
     out_rms = std::sqrt(sum_sq_err / static_cast<double>(point_count));
+    return true;
+}
+
+// RANSAC 稳健圆拟合 (抗脏污粘连与局部突变离群点)
+bool fitCircleRansac(
+    const std::vector<cv::Point>& contour,
+    double& out_cx,
+    double& out_cy,
+    double& out_r,
+    double& out_rms,
+    double& out_inlier_ratio,
+    int max_iterations = 60,
+    double inlier_thresh = 1.5
+) {
+    const size_t n = contour.size();
+    if (n < 5) {
+        return false;
+    }
+
+    // 1. 先进行一次全点集初拟合
+    double init_cx = 0.0;
+    double init_cy = 0.0;
+    double init_r = 0.0;
+    double init_rms = 0.0;
+    std::vector<int> best_inliers;
+
+    if (fitCircleLeastSquares(contour, init_cx, init_cy, init_r, init_rms)) {
+        for (size_t i = 0; i < n; ++i) {
+            const double dx = contour[i].x - init_cx;
+            const double dy = contour[i].y - init_cy;
+            const double dist = std::sqrt(dx * dx + dy * dy);
+            if (std::abs(dist - init_r) < inlier_thresh) {
+                best_inliers.push_back(static_cast<int>(i));
+            }
+        }
+        // 若初拟合内点率极高，直接收敛
+        if (best_inliers.size() >= static_cast<size_t>(0.85 * n)) {
+            out_cx = init_cx;
+            out_cy = init_cy;
+            out_r = init_r;
+            out_rms = init_rms;
+            out_inlier_ratio = static_cast<double>(best_inliers.size()) / static_cast<double>(n);
+            return true;
+        }
+    }
+
+    // 2. RANSAC 确定性伪随机采样三点建立假设模型
+    uint32_t rng_state = 123456789U;
+    auto fast_rand = [&rng_state]() -> uint32_t {
+        rng_state ^= (rng_state << 13);
+        rng_state ^= (rng_state >> 17);
+        rng_state ^= (rng_state << 5);
+        return rng_state;
+    };
+
+    for (int iter = 0; iter < max_iterations; ++iter) {
+        const size_t idx1 = fast_rand() % n;
+        size_t idx2 = fast_rand() % n;
+        while (idx2 == idx1) idx2 = fast_rand() % n;
+        size_t idx3 = fast_rand() % n;
+        while (idx3 == idx1 || idx3 == idx2) idx3 = fast_rand() % n;
+
+        const cv::Point2d p1(contour[idx1].x, contour[idx1].y);
+        const cv::Point2d p2(contour[idx2].x, contour[idx2].y);
+        const cv::Point2d p3(contour[idx3].x, contour[idx3].y);
+
+        const double d = 2.0 * (p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
+        if (std::abs(d) < 1e-6) {
+            continue;
+        }
+
+        const double p1_sq = p1.x * p1.x + p1.y * p1.y;
+        const double p2_sq = p2.x * p2.x + p2.y * p2.y;
+        const double p3_sq = p3.x * p3.x + p3.y * p3.y;
+
+        const double sample_cx = (p1_sq * (p2.y - p3.y) + p2_sq * (p3.y - p1.y) + p3_sq * (p1.y - p2.y)) / d;
+        const double sample_cy = (p1_sq * (p3.x - p2.x) + p2_sq * (p1.x - p3.x) + p3_sq * (p2.x - p1.x)) / d;
+        const double sample_r = std::sqrt((p1.x - sample_cx) * (p1.x - sample_cx) + (p1.y - sample_cy) * (p1.y - sample_cy));
+
+        if (sample_r < 8.0 || sample_r > 2000.0) {
+            continue;
+        }
+
+        std::vector<int> current_inliers;
+        current_inliers.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            const double dx = contour[i].x - sample_cx;
+            const double dy = contour[i].y - sample_cy;
+            const double dist = std::sqrt(dx * dx + dy * dy);
+            if (std::abs(dist - sample_r) < inlier_thresh) {
+                current_inliers.push_back(static_cast<int>(i));
+            }
+        }
+
+        if (current_inliers.size() > best_inliers.size()) {
+            best_inliers = std::move(current_inliers);
+        }
+    }
+
+    if (best_inliers.size() < 5 || best_inliers.size() < static_cast<size_t>(0.35 * n)) {
+        return false;
+    }
+
+    // 3. 提取所有内点进行最小二乘精拟合
+    std::vector<cv::Point> inlier_pts;
+    inlier_pts.reserve(best_inliers.size());
+    for (int idx : best_inliers) {
+        inlier_pts.push_back(contour[idx]);
+    }
+
+    if (!fitCircleLeastSquares(inlier_pts, out_cx, out_cy, out_r, out_rms)) {
+        return false;
+    }
+
+    out_inlier_ratio = static_cast<double>(best_inliers.size()) / static_cast<double>(n);
     return true;
 }
 
@@ -196,6 +311,7 @@ Status CircleCenterOffsetModule::findCircleCenterOffset(
     const int img_w = mono8.cols;
     const int img_h = mono8.rows;
     const double total_pixels = static_cast<double>(img_w * img_h);
+    const Point2D image_center(img_w / 2.0, img_h / 2.0);
 
     // 1. 多尺度高斯差分 (DoG) 去除全局不均匀背景并增强边缘
     cv::Mat g_small;
@@ -207,6 +323,14 @@ Status CircleCenterOffsetModule::findCircleCenterOffset(
     cv::Mat diff_neg;
     cv::subtract(g_small, g_large, diff_pos);
     cv::subtract(g_large, g_small, diff_neg);
+
+    // 计算梯度幅值图用于边缘能量加权
+    cv::Mat gx;
+    cv::Mat gy;
+    cv::Sobel(g_small, gx, CV_32F, 1, 0, 3);
+    cv::Sobel(g_small, gy, CV_32F, 0, 1, 3);
+    cv::Mat grad_mag;
+    cv::magnitude(gx, gy, grad_mag);
 
     std::vector<CircleCandidate> candidates;
 
@@ -237,7 +361,6 @@ Status CircleCenterOffsetModule::findCircleCenterOffset(
         cv::Mat hist;
         cv::calcHist(&diff_img, 1, 0, cv::Mat(), hist, 1, &hist_size, &hist_range, true, false);
 
-        // 寻找 98.0% 与 99.5% 分位数阈值
         const double target_count_98 = total_pixels * 0.98;
         const double target_count_995 = total_pixels * 0.995;
 
@@ -275,8 +398,8 @@ Status CircleCenterOffsetModule::findCircleCenterOffset(
 
         for (const auto& c : contours) {
             const double area = cv::contourArea(c);
-            // 过滤面积过小或过大的轮廓
-            if (area < 80.0 || area > 0.6 * total_pixels) {
+            // 过滤微小脏污与过大背景 (目标圆面积通常在 250 像素以上)
+            if (area < 250.0 || area > 0.6 * total_pixels) {
                 continue;
             }
 
@@ -286,8 +409,8 @@ Status CircleCenterOffsetModule::findCircleCenterOffset(
             }
 
             const double circularity = 4.0 * CV_PI * area / (perimeter * perimeter);
-            if (circularity < 0.50) {
-                continue; // 圆度过低，非圆
+            if (circularity < 0.45) {
+                continue; // 圆度过低
             }
 
             // 几何长宽比检查
@@ -297,7 +420,7 @@ Status CircleCenterOffsetModule::findCircleCenterOffset(
             if (rect_w > 0.0f && rect_h > 0.0f) {
                 const double aspect_ratio = static_cast<double>(std::max(rect_w, rect_h)) /
                                             static_cast<double>(std::min(rect_w, rect_h));
-                if (aspect_ratio > 1.45) {
+                if (aspect_ratio > 1.55) {
                     continue; // 明显非圆
                 }
             }
@@ -306,24 +429,46 @@ Status CircleCenterOffsetModule::findCircleCenterOffset(
             double fit_cy = 0.0;
             double fit_r = 0.0;
             double fit_rms = 0.0;
+            double inlier_ratio = 1.0;
 
-            if (!fitCircleAlgebraic(c, fit_cx, fit_cy, fit_r, fit_rms)) {
+            // 采用 RANSAC 稳健圆拟合
+            if (!fitCircleRansac(c, fit_cx, fit_cy, fit_r, fit_rms, inlier_ratio)) {
                 continue;
             }
 
-            if (fit_r < 3.0 || fit_r > std::min(img_w, img_h) / 2.0) {
+            if (fit_r < 10.0 || fit_r > std::min(img_w, img_h) / 2.0) {
                 continue;
             }
 
-            // 综合评价打分 (圆度高、残差小优先)
-            const double score = circularity * 10.0 - fit_rms * 0.5;
+            // 计算圆周边缘平均梯度能量 (采样 36 个方向)
+            double edge_energy_sum = 0.0;
+            const int sample_num = 36;
+            for (int k = 0; k < sample_num; ++k) {
+                const double angle = k * (2.0 * CV_PI / sample_num);
+                const int sx = std::clamp(cvRound(fit_cx + fit_r * std::cos(angle)), 0, img_w - 1);
+                const int sy = std::clamp(cvRound(fit_cy + fit_r * std::sin(angle)), 0, img_h - 1);
+                edge_energy_sum += grad_mag.at<float>(sy, sx);
+            }
+            const double edge_energy = edge_energy_sum / sample_num;
+
+            // 视场中心距离惩罚因子
+            const double dist_to_center = std::sqrt((fit_cx - image_center.x) * (fit_cx - image_center.x) +
+                                                    (fit_cy - image_center.y) * (fit_cy - image_center.y));
+            const double center_weight = 1.0 / (1.0 + dist_to_center / (img_w * 0.5));
+            const double area_weight = std::log10(area);
+
+            // 综合打分: 圆度 + RANSAC内点率 - RMS残差 + 边缘能量
+            const double score = (circularity * 5.0 + inlier_ratio * 5.0 - fit_rms * 0.5 + edge_energy * 0.2) *
+                                 area_weight * center_weight;
 
             CircleCandidate cand;
             cand.cx = fit_cx;
             cand.cy = fit_cy;
             cand.r = fit_r;
             cand.circularity = circularity;
+            cand.inlier_ratio = inlier_ratio;
             cand.rms = fit_rms;
+            cand.edge_energy = edge_energy;
             cand.score = score;
             cand.contour = c;
             cand.is_bright = is_bright;
@@ -342,9 +487,6 @@ Status CircleCenterOffsetModule::findCircleCenterOffset(
     });
 
     const CircleCandidate& best = candidates.front();
-
-    // 图像几何中心 (width / 2.0, height / 2.0)
-    const Point2D image_center(img_w / 2.0, img_h / 2.0);
 
     result.circle_center = Point2D(best.cx, best.cy);
     result.radius = best.r;

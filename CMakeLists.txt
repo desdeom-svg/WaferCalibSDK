@@ -65,3 +65,7 @@ target_link_libraries(test_line_scan_color_distortion PRIVATE WaferCalibSDK ${Op
 add_executable(test_circle_center_offset tests/test_circle_center_offset.cpp)
 target_link_libraries(test_circle_center_offset PRIVATE WaferCalibSDK ${OpenCV_LIBS})
 
+add_executable(circle_center_offset_tool tools/circle_center_offset_tool.cpp)
+target_link_libraries(circle_center_offset_tool PRIVATE WaferCalibSDK ${OpenCV_LIBS})
+
+

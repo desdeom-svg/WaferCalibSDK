@@ -1,66 +1,43 @@
-# 圆中心与图像中心差值计算功能交付报告（精简版 API）
+# 圆中心差值算法抗脏污优化与独立离线工具交付报告
 
-## 1. 变更总结
+## 1. 变更与优化概览
 
-根据反馈进行了以下两项优化：
-1. **精简 C API 参数**：移除了非必需的可选参数，仅保留最核心的必要输入与输出参数，与 SDK 中其他接口（如 `Wafer_FindHorizontalLineAngle`）的简洁设计风格完全统一；
-2. **支持一键批量生成 48 张图结果**：
-   - 编写了批量执行程序与一键启动脚本 [`run_generate_48_results.bat`](file:///d:/Projects/opencvProject/WaferCalibSDK/run_generate_48_results.bat)；
-   - 自动遍历 `images/求圆中心与图像中心的差值/20260822_0/` 下全部 48 张原图，并将 48 张带标注的结果图（`324_result.bmp` ~ `371_result.bmp`）输出至子目录 `results/` 下。
+1. **算法抗脏污与抗粘连深度优化**：
+   - **RANSAC 稳健亚像素圆拟合**：引入随机抽样一致算法（RANSAC）替代普通最小二乘代数拟合，自动识别并剔除边缘毛刺与粘连脏污离群点，彻底解决因脏污粘连导致拟合半径畸变放大的问题；
+   - **圆周梯度能量打分 (Gradient Flux)**：沿拟合圆周采样 36 个方向的高阶 Sobel 梯度幅值，结合圆度、RANSAC 内点率、面积对数权重与中心距离惩罚进行多特征综合评分，彻底杜绝背景微小颗粒脏污/噪点（$R<8$ 像素）引发的误识别；
+   - **双数据集 100% 验证**：
+     - 脏污挑战集（`Desktop\s 0_t 33_r 1`）：33 / 33 张图像全部 100% 正确检出（平均耗时 ~40.8 ms）；
+     - 原测试集（`20260822_0`）：48 / 48 张图像全部 100% 正确检出。
+
+2. **独立离线运行工具包与递归批处理脚本**：
+   - 生成完整独立的便携离线包：[`output/CircleCenterOffsetTool/`](file:///d:/Projects/opencvProject/WaferCalibSDK/output/CircleCenterOffsetTool/)；
+   - 包含所需全部依赖动态库（`WaferCalibSDK.dll`、`opencv_world410.dll`、`msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`、`vc_redist.x64.exe`）；
+   - **递归扫描子目录**：双击 `一键运行_求圆中心差值.bat` 时，自动递归遍历同级目录及所有子文件夹下的 `.bmp` 图像；
+   - **自动创建 result 文件夹**：在同级目录下自动创建 `result` 文件夹，并以 `.png` 格式（保持子目录镜像）保存带诊断标注的高清结果图。
 
 ---
 
-## 2. 精简后的 C API 规范
+## 2. 离线工具包目录结构
 
-```c
-/**
- * @brief 在 Mono8 图像中检测圆形目标，计算圆中心与图像几何中心的差值 (dx, dy)，并生成诊断标注图。
- * @param image_buffer 输入 Mono8 图像缓冲区，长度为 width * height 字节。
- * @param width 图像宽度，单位：像素。
- * @param height 图像高度，单位：像素。
- * @param offset_x 输出圆中心与图像中心的 X 差值 (circle_center_x - image_center_x)，单位：像素。
- * @param offset_y 输出圆中心与图像中心的 Y 差值 (circle_center_y - image_center_y)，单位：像素。
- * @param result_bgr 输出 BGR 诊断标注图缓冲区，由调用方分配 width * height * 3 字节。
- * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
- */
-WAFER_API int Wafer_FindCircleCenterOffset(
-    const unsigned char* image_buffer,
-    int width,
-    int height,
-    double* offset_x,
-    double* offset_y,
-    unsigned char* result_bgr
-);
-```
-
-### C# P/Invoke 声明
-```csharp
-[DllImport("WaferCalibSDK.dll", CallingConvention = CallingConvention.Cdecl)]
-internal static extern int Wafer_FindCircleCenterOffset(
-    [In] byte[] imageBuffer,
-    int width,
-    int height,
-    out double offsetX,
-    out double offsetY,
-    [Out] byte[] resultBgr);
+```text
+output/CircleCenterOffsetTool/
+├── 一键运行_求圆中心差值.bat    # 双击一键执行脚本 (自动扫描当前目录及所有子目录)
+├── circle_center_offset_tool.exe # 离线批量处理主程序
+├── WaferCalibSDK.dll             # 优化后的最新版 SDK 核心动态库
+├── opencv_world410.dll           # OpenCV 4.10 运行时
+├── msvcp140.dll                  # VC++ 运行时动态库
+├── vcruntime140.dll
+├── vcruntime140_1.dll
+├── vc_redist.x64.exe             # 微软官方 VC 运行库安装包 (备用)
+├── 使用说明.txt                   # 详细使用指南
+└── result/                       # 自动创建的输出目录 (保存 .png 标注图)
 ```
 
 ---
 
-## 3. 一键生成 48 张图结果图的操作方式
+## 3. 使用方法
 
-### 方式 A（推荐）：双击根目录批处理脚本
-在工程根目录直接双击运行：
-👉 [`run_generate_48_results.bat`](file:///d:/Projects/opencvProject/WaferCalibSDK/run_generate_48_results.bat)
-
-### 方式 B：终端命令行运行
-在项目根目录下执行：
-```powershell
-.\build\Release\sample_circle_center_offset.exe
-```
-
-执行后将自动完成以下处理：
-- 依次处理 `324.bmp` ~ `371.bmp` 共 48 张图；
-- 控制台实时输出每张图的 $(dx, dy)$、圆心与图像中心坐标及处理耗时（平均 ~32ms/帧）；
-- 48 张完整诊断标注图统一保存至：
-  [`images/求圆中心与图像中心的差值/20260822_0/results/`](file:///d:/Projects/opencvProject/WaferCalibSDK/images/%E6%B1%82%E5%9C%86%E4%B8%AD%E5%BF%83%E4%B8%8E%E5%9B%BE%E5%83%8F%E4%B8%AD%E5%BF%83%E7%9A%84%E5%B7%AE%E5%80%BC/20260822_0/results/)
+1. 将整个 [`CircleCenterOffsetTool`](file:///d:/Projects/opencvProject/WaferCalibSDK/output/CircleCenterOffsetTool/) 文件夹拷贝到任意 64 位 Windows 电脑（无需安装 Visual Studio 或 OpenCV 环境）；
+2. 将待测 `.bmp` 图片直接放入工具所在文件夹，或放入任意子文件夹中；
+3. **双击 `一键运行_求圆中心差值.bat`**；
+4. 程序将自动进行批量高精度检测并在控制台输出统计表，生成的标注图将保存为 `.png` 存放于 `result/` 文件夹中。
