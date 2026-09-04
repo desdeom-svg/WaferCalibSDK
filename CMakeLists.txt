@@ -59,6 +59,9 @@ target_link_libraries(test_line_angle PRIVATE WaferCalibSDK ${OpenCV_LIBS})
 add_executable(test_distortion_correction tests/test_distortion_correction.cpp)
 target_link_libraries(test_distortion_correction PRIVATE WaferCalibSDK ${OpenCV_LIBS})
 
+add_executable(test_multi_view_distortion_correction tests/test_multi_view_distortion_correction.cpp)
+target_link_libraries(test_multi_view_distortion_correction PRIVATE WaferCalibSDK ${OpenCV_LIBS})
+
 add_executable(test_line_scan_color_distortion tests/test_line_scan_color_distortion.cpp)
 target_link_libraries(test_line_scan_color_distortion PRIVATE WaferCalibSDK ${OpenCV_LIBS})
 

@@ -67,6 +67,27 @@ inline cv::Mat readImageUnicode(const std::string& filepath, int flags = cv::IMR
     return cv::imdecode(ubuf, flags);
 }
 
+// 支持中文/Unicode路径的安全图像写入函数
+inline bool writeImageUnicode(const std::string& filepath, const cv::Mat& image) {
+    if (filepath.empty() || image.empty()) return false;
+    std::string ext = ".bmp";
+    size_t dot_pos = filepath.find_last_of('.');
+    if (dot_pos != std::string::npos) {
+        ext = filepath.substr(dot_pos);
+    }
+    std::vector<uchar> buf;
+    if (!cv::imencode(ext, image, buf)) return false;
+#ifdef _WIN32
+    std::wstring wpath = stringToWstring(filepath);
+    std::ofstream file(wpath, std::ios::binary);
+#else
+    std::ofstream file(filepath, std::ios::binary);
+#endif
+    if (!file.is_open()) return false;
+    file.write(reinterpret_cast<const char*>(buf.data()), buf.size());
+    return true;
+}
+
 // 亚像素 2D 点
 struct Point2D {
     double x = 0.0;

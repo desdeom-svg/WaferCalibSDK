@@ -1,13 +1,27 @@
-﻿# 任务清单：新增圆中心与图像中心差值计算接口
+# 任务清单：5视野畸变标定与接口扩展实施
 
-- [x] 1. 新增 C++ 模块头文件 include/wafer_calib/modules/circle_center_offset.hpp
-- [x] 2. 新增 C++ 模块源文件 src/modules/circle_center_offset.cpp
-- [x] 3. 更新 SDK 主头文件 include/wafer_calib/wafer_calib.hpp
-- [x] 4. 在 C API 头文件 include/wafer_calib/c_api/wafer_calib_c.h 中声明 Wafer_FindCircleCenterOffset
-- [x] 5. 在 C API 源文件 src/c_api/wafer_calib_c.cpp 中实现 Wafer_FindCircleCenterOffset
-- [x] 6. 新增示例程序 samples/sample_circle_center_offset.cpp
-- [x] 7. 新增自动化测试程序 	ests/test_circle_center_offset.cpp
-- [x] 8. 更新 CMakeLists.txt 添加测试工程
-- [x] 9. 编译并运行自动化测试，验证 48 张真实图片 100% 通过
-- [x] 10. 更新 C API 调用说明文档 docs/WaferCalibSDK_C_API调用说明.md
-- [x] 11. 生成 Walkthrough 并完成交付
+- [x] 方案设计与实施规划 <!-- id: 0 -->
+    - [x] 实测 5 个倍率 25 张图像圆点特征与视野重叠规律 <!-- id: 1 -->
+    - [x] 确认中心特征圆（第101个圆）定位与网格索引可行性 <!-- id: 2 -->
+    - [x] 确定外参初值估计方案（纯视觉自闭环为主，机台步长可选校验） <!-- id: 3 -->
+    - [x] 确认保留单视野接口、新增 5 视野接口原则 <!-- id: 4 -->
+- [x] 核心算法模块实现 <!-- id: 5 -->
+    - [x] 实现高抗噪白圆检测与亚像素中心提取器（顶帽变换 + 轮廓/圆拟合） <!-- id: 6 -->
+    - [x] 实现中心标记点识别与 10x10 网格拓扑索引建立 <!-- id: 7 -->
+    - [x] 实现视野间外参初值估计（SVD刚体对齐） <!-- id: 8 -->
+    - [x] 实现 5 视野全局联合优化拟合求解器，输出全局单一标定模板 <!-- id: 9 -->
+    - [x] 实现全像面 5 视野覆盖与残差热力诊断图生成 <!-- id: 10 -->
+- [x] 接口层扩展 <!-- id: 11 -->
+    - [x] 在 distortion_correction.hpp 中新增 C++ 5视野标定接口与数据结构 <!-- id: 12 -->
+    - [x] 在 wafer_calib_c.h 与 wafer_calib_c.cpp 中新增 C API 导出接口 <!-- id: 13 -->
+- [x] 验证与测试 <!-- id: 14 -->
+    - [x] 编写 5 视野标定单元测试 test_multi_view_distortion_correction.cpp <!-- id: 15 -->
+    - [x] 配置 CMakeLists.txt 并编译构建 <!-- id: 16 -->
+    - [x] 执行原有回归测试，确保单视野接口零破坏 <!-- id: 17 -->
+    - [x] 执行 5 个倍率全部真实图像验证，验证 RMS 残差与校正效果 <!-- id: 18 -->
+- [x] 5 视野无损拼接诊断大图改造 (3x3 十字物理拓扑与独立视野标注) <!-- id: 19 -->
+    - [x] 重构诊断图绘制逻辑：各视野仅在其原图上绘制属于自己的圆点与网格编号 <!-- id: 20 -->
+    - [x] 实现 3x3 十字无损拼接大图，布局符合机台物理移动方向 <!-- id: 21 -->
+    - [x] 在空闲槽位填充全局标定汇总仪表盘与图例说明 <!-- id: 22 -->
+    - [x] 确保 C API 内存安全 (如果传入单图尺寸缓冲区则安全缩小，文件保存则保留全画幅) <!-- id: 23 -->
+    - [x] 编译并运行 5 组真实倍率图像测试，重新生成无损拼接诊断大图 <!-- id: 24 -->

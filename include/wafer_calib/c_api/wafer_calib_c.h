@@ -152,6 +152,52 @@ WAFER_API int Wafer_CreateDotGridDistortionTemplate(
 );
 
 /**
+ * @brief 结合 5 个视野图像缓冲区进行多视野畸变标定，生成单一全局标定模板。
+ * @param image_buffers 包含 5 个图像指针的数组，顺序固定为：[中心, 左上, 左下, 右上, 右下]；每帧长度为 width * height 字节。
+ * @param width 图像宽度，单位：像素。
+ * @param height 图像高度，单位：像素。
+ * @param grid_columns 标定板网格列数 (如 10)。
+ * @param grid_rows 标定板网格行数 (如 10)。
+ * @param point_spacing_mm 该倍率下标定板大圆物理间距，单位：毫米。
+ * @param stage_step_mm 机台位移步长先验值，单位：毫米；若传 0.0 则由算法纯视觉自适应匹配。
+ * @param out_template 输出单一全局畸变模板结构体指针。
+ * @param result_bgr 输出全像面 BGR 诊断图缓冲区，含 5 视野覆盖、编号与残差矢量，长度为 width * height * 3 字节；传 NULL 表示不输出。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CreateMultiViewDotGridDistortionTemplate(
+    const unsigned char** image_buffers,
+    int width,
+    int height,
+    int grid_columns,
+    int grid_rows,
+    double point_spacing_mm,
+    double stage_step_mm,
+    WaferDotGridDistortionTemplate* out_template,
+    unsigned char* result_bgr
+);
+
+/**
+ * @brief 从 5 个视野文件路径读取图像并进行多视野畸变标定，可直接保存诊断图。
+ * @param file_paths 包含 5 个图像文件路径的数组，顺序固定为：[中心, 左上, 左下, 右上, 右下]；支持 Windows Unicode 中文路径。
+ * @param grid_columns 标定板网格列数 (如 10)。
+ * @param grid_rows 标定板网格行数 (如 10)。
+ * @param point_spacing_mm 该倍率下标定板大圆物理间距，单位：毫米。
+ * @param stage_step_mm 机台位移步长先验值，单位：毫米；若传 0.0 则由算法纯视觉自适应匹配。
+ * @param out_template 输出单一全局畸变模板结构体指针；传 NULL 时不获取结构体。
+ * @param save_diagnostic_image_path 诊断图保存路径；传 NULL 或空字符串时不保存。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CreateMultiViewDotGridTemplateFromFiles(
+    const char** file_paths,
+    int grid_columns,
+    int grid_rows,
+    double point_spacing_mm,
+    double stage_step_mm,
+    WaferDotGridDistortionTemplate* out_template,
+    const char* save_diagnostic_image_path
+);
+
+/**
  * @brief 使用同尺寸点阵畸变模板校正一张 Mono8 图像。
  * @param image_buffer 输入 Mono8 图像，长度为 width * height 字节。
  * @param width 输入图宽度，必须等于 distortion_template->image_width。
@@ -166,6 +212,28 @@ WAFER_API int Wafer_CorrectImageByDotGridTemplate(
     int height,
     const WaferDotGridDistortionTemplate* distortion_template,
     unsigned char* corrected_mono8
+);
+
+/**
+ * @brief 将畸变标定模板保存到磁盘文件 (支持 .json 或 .bin 格式)。
+ * @param file_path 保存文件路径；支持 Windows Unicode 中文路径。
+ * @param distortion_template 待保存的标定模板指针。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_SaveDistortionTemplateToFile(
+    const char* file_path,
+    const WaferDotGridDistortionTemplate* distortion_template
+);
+
+/**
+ * @brief 从磁盘文件加载畸变标定模板 (支持 .json 或 .bin 格式)。
+ * @param file_path 标定文件路径；支持 Windows Unicode 中文路径。
+ * @param out_template 输出恢复的标定模板指针。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_LoadDistortionTemplateFromFile(
+    const char* file_path,
+    WaferDotGridDistortionTemplate* out_template
 );
 
 /**

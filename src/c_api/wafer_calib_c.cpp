@@ -101,6 +101,132 @@ WAFER_API int Wafer_CreateDotGridDistortionTemplate(
     return WAFER_SUCCESS;
 }
 
+WAFER_API int Wafer_CreateMultiViewDotGridDistortionTemplate(
+    const unsigned char** image_buffers,
+    int width,
+    int height,
+    int grid_columns,
+    int grid_rows,
+    double point_spacing_mm,
+    double stage_step_mm,
+    WaferDotGridDistortionTemplate* out_template,
+    unsigned char* result_bgr
+) {
+    if (!image_buffers || width <= 0 || height <= 0 || grid_columns < 2 || grid_rows < 2 ||
+        point_spacing_mm <= 0.0 || !out_template) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    const wafer_calib::CalibrationViewPosition positions[5] = {
+        wafer_calib::CalibrationViewPosition::Center,
+        wafer_calib::CalibrationViewPosition::TopLeft,
+        wafer_calib::CalibrationViewPosition::BottomLeft,
+        wafer_calib::CalibrationViewPosition::TopRight,
+        wafer_calib::CalibrationViewPosition::BottomRight
+    };
+
+    std::vector<wafer_calib::CalibrationViewInput> views;
+    views.reserve(5);
+    for (int i = 0; i < 5; ++i) {
+        if (!image_buffers[i]) {
+            return WAFER_ERR_INVALID_PARAM;
+        }
+        wafer_calib::CalibrationViewInput view;
+        view.position = positions[i];
+        view.image_mono8 = cv::Mat(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i]));
+        views.push_back(view);
+    }
+
+    wafer_calib::DotGridDistortionTemplate cpp_template;
+    cv::Mat diagnostic;
+    const wafer_calib::Status status = wafer_calib::DistortionCorrectionModule::createMultiViewDotGridTemplate(
+        views, grid_columns, grid_rows, point_spacing_mm, stage_step_mm, cpp_template, diagnostic);
+
+    if (!status.ok()) {
+        return statusToCErrorCode(status);
+    }
+
+    dotGridTemplateToC(cpp_template, *out_template);
+
+    if (result_bgr && !diagnostic.empty()) {
+        cv::Mat out_diag(height, width, CV_8UC3, result_bgr);
+        if (diagnostic.cols == width && diagnostic.rows == height) {
+            diagnostic.copyTo(out_diag);
+        } else {
+            cv::resize(diagnostic, out_diag, cv::Size(width, height), 0, 0, cv::INTER_AREA);
+        }
+    }
+
+    return WAFER_SUCCESS;
+}
+
+WAFER_API int Wafer_CreateMultiViewDotGridTemplateFromFiles(
+    const char** file_paths,
+    int grid_columns,
+    int grid_rows,
+    double point_spacing_mm,
+    double stage_step_mm,
+    WaferDotGridDistortionTemplate* out_template,
+    const char* save_diagnostic_image_path
+) {
+    if (!file_paths || grid_columns < 2 || grid_rows < 2 || point_spacing_mm <= 0.0) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    const wafer_calib::CalibrationViewPosition positions[5] = {
+        wafer_calib::CalibrationViewPosition::Center,
+        wafer_calib::CalibrationViewPosition::TopLeft,
+        wafer_calib::CalibrationViewPosition::BottomLeft,
+        wafer_calib::CalibrationViewPosition::TopRight,
+        wafer_calib::CalibrationViewPosition::BottomRight
+    };
+
+    std::vector<wafer_calib::CalibrationViewInput> views;
+    views.reserve(5);
+    int width = 0;
+    int height = 0;
+
+    for (int i = 0; i < 5; ++i) {
+        if (!file_paths[i]) {
+            return WAFER_ERR_INVALID_PARAM;
+        }
+        cv::Mat img = wafer_calib::readImageUnicode(file_paths[i], cv::IMREAD_GRAYSCALE);
+        if (img.empty()) {
+            return WAFER_ERR_IMAGE_EMPTY;
+        }
+        if (width == 0) {
+            width = img.cols;
+            height = img.rows;
+        } else if (img.cols != width || img.rows != height) {
+            return WAFER_ERR_FORMAT_MISMATCH;
+        }
+
+        wafer_calib::CalibrationViewInput view;
+        view.position = positions[i];
+        view.image_mono8 = img;
+        views.push_back(view);
+    }
+
+    wafer_calib::DotGridDistortionTemplate cpp_template;
+    cv::Mat diagnostic;
+    const wafer_calib::Status status = wafer_calib::DistortionCorrectionModule::createMultiViewDotGridTemplate(
+        views, grid_columns, grid_rows, point_spacing_mm, stage_step_mm, cpp_template, diagnostic);
+
+    if (!status.ok()) {
+        return statusToCErrorCode(status);
+    }
+
+    if (out_template) {
+        dotGridTemplateToC(cpp_template, *out_template);
+    }
+
+    if (save_diagnostic_image_path && save_diagnostic_image_path[0] != '\0' && !diagnostic.empty()) {
+        wafer_calib::writeImageUnicode(save_diagnostic_image_path, diagnostic);
+    }
+
+    return WAFER_SUCCESS;
+}
+
 WAFER_API int Wafer_CorrectImageByDotGridTemplate(
     const unsigned char* image_buffer,
     int width,
@@ -118,6 +244,37 @@ WAFER_API int Wafer_CorrectImageByDotGridTemplate(
     const wafer_calib::Status status = wafer_calib::DistortionCorrectionModule::correctByDotGridTemplate(
         input, cpp_template, corrected);
     return statusToCErrorCode(status);
+}
+
+WAFER_API int Wafer_SaveDistortionTemplateToFile(
+    const char* file_path,
+    const WaferDotGridDistortionTemplate* distortion_template
+) {
+    if (!file_path || file_path[0] == '\0' || !distortion_template) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    const wafer_calib::DotGridDistortionTemplate cpp_template = dotGridTemplateFromC(*distortion_template);
+    const wafer_calib::Status status = wafer_calib::DistortionCorrectionModule::saveTemplateToFile(file_path, cpp_template);
+    return statusToCErrorCode(status);
+}
+
+WAFER_API int Wafer_LoadDistortionTemplateFromFile(
+    const char* file_path,
+    WaferDotGridDistortionTemplate* distortion_template
+) {
+    if (!file_path || file_path[0] == '\0' || !distortion_template) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    wafer_calib::DotGridDistortionTemplate cpp_template{};
+    const wafer_calib::Status status = wafer_calib::DistortionCorrectionModule::loadTemplateFromFile(file_path, cpp_template);
+    if (!status.ok()) {
+        return statusToCErrorCode(status);
+    }
+
+    dotGridTemplateToC(cpp_template, *distortion_template);
+    return WAFER_SUCCESS;
 }
 
 WAFER_API int Wafer_FindFourCrossMarkCenter(
