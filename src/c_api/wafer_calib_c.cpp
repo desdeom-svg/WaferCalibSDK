@@ -149,11 +149,13 @@ WAFER_API int Wafer_CreateMultiViewDotGridDistortionTemplate(
     dotGridTemplateToC(cpp_template, *out_template);
 
     if (result_bgr && !diagnostic.empty()) {
-        cv::Mat out_diag(height, width, CV_8UC3, result_bgr);
-        if (diagnostic.cols == width && diagnostic.rows == height) {
+        const int diag_w = width * 3;
+        const int diag_h = height * 3;
+        cv::Mat out_diag(diag_h, diag_w, CV_8UC3, result_bgr);
+        if (diagnostic.cols == diag_w && diagnostic.rows == diag_h) {
             diagnostic.copyTo(out_diag);
         } else {
-            cv::resize(diagnostic, out_diag, cv::Size(width, height), 0, 0, cv::INTER_AREA);
+            cv::resize(diagnostic, out_diag, cv::Size(diag_w, diag_h), 0, 0, cv::INTER_AREA);
         }
     }
 
@@ -407,4 +409,288 @@ WAFER_API int Wafer_FindCircleCenterOffset(
     return WAFER_SUCCESS;
 }
 
+WAFER_API int Wafer_CalculatePlatformRotationCenter(
+    const unsigned char** image_buffers,
+    int image_count,
+    int width,
+    int height,
+    WaferPlatformRotationCenterResult* out_result,
+    unsigned char* result_bgr
+) {
+    if (!image_buffers || image_count < 3 || width <= 0 || height <= 0 || !out_result) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    std::vector<cv::Mat> images;
+    images.reserve(image_count);
+    for (int i = 0; i < image_count; ++i) {
+        if (!image_buffers[i]) {
+            return WAFER_ERR_INVALID_PARAM;
+        }
+        images.emplace_back(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i]));
+    }
+
+    wafer_calib::PlatformRotationCenterResult cpp_result;
+    cv::Mat diagnostic;
+    const wafer_calib::Status status = wafer_calib::PlatformRotationCenterModule::calculateRotationCenter(
+        images, cpp_result, diagnostic);
+
+    if (!status.ok()) {
+        return statusToCErrorCode(status);
+    }
+
+    out_result->center_x = cpp_result.rotation_center.x;
+    out_result->center_y = cpp_result.rotation_center.y;
+    out_result->radius = cpp_result.rotation_radius;
+    out_result->rms_error = cpp_result.rms_error;
+    out_result->max_error = cpp_result.max_error;
+    out_result->valid_point_count = std::min(cpp_result.valid_point_count, WAFER_ROTATION_CENTER_MAX_POINTS);
+
+    for (int i = 0; i < out_result->valid_point_count; ++i) {
+        out_result->point_x[i] = cpp_result.detected_points[i].x;
+        out_result->point_y[i] = cpp_result.detected_points[i].y;
+        out_result->point_residual[i] = cpp_result.radial_residuals[i];
+    }
+
+    if (result_bgr && !diagnostic.empty()) {
+        cv::Mat out_mat(height, width, CV_8UC3, result_bgr);
+        diagnostic.copyTo(out_mat);
+    }
+
+    return WAFER_SUCCESS;
+}
+
+WAFER_API int Wafer_CalculatePlatformRotationCenterFromFiles(
+    const char** file_paths,
+    int file_count,
+    WaferPlatformRotationCenterResult* out_result,
+    const char* save_diagnostic_image_path
+) {
+    if (!file_paths || file_count < 3) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    std::vector<cv::Mat> images;
+    images.reserve(file_count);
+    for (int i = 0; i < file_count; ++i) {
+        if (!file_paths[i]) {
+            return WAFER_ERR_INVALID_PARAM;
+        }
+        cv::Mat img = wafer_calib::readImageUnicode(file_paths[i], cv::IMREAD_GRAYSCALE);
+        if (img.empty()) {
+            return WAFER_ERR_IMAGE_EMPTY;
+        }
+        images.push_back(img);
+    }
+
+    wafer_calib::PlatformRotationCenterResult cpp_result;
+    cv::Mat diagnostic;
+    const wafer_calib::Status status = wafer_calib::PlatformRotationCenterModule::calculateRotationCenter(
+        images, cpp_result, diagnostic);
+
+    if (!status.ok()) {
+        return statusToCErrorCode(status);
+    }
+
+    if (out_result) {
+        out_result->center_x = cpp_result.rotation_center.x;
+        out_result->center_y = cpp_result.rotation_center.y;
+        out_result->radius = cpp_result.rotation_radius;
+        out_result->rms_error = cpp_result.rms_error;
+        out_result->max_error = cpp_result.max_error;
+        out_result->valid_point_count = std::min(cpp_result.valid_point_count, WAFER_ROTATION_CENTER_MAX_POINTS);
+
+        for (int i = 0; i < out_result->valid_point_count; ++i) {
+            out_result->point_x[i] = cpp_result.detected_points[i].x;
+            out_result->point_y[i] = cpp_result.detected_points[i].y;
+            out_result->point_residual[i] = cpp_result.radial_residuals[i];
+        }
+    }
+
+    if (save_diagnostic_image_path && save_diagnostic_image_path[0] != '\0' && !diagnostic.empty()) {
+        if (!wafer_calib::writeImageUnicode(save_diagnostic_image_path, diagnostic)) {
+            return WAFER_ERR_FILE_IO;
+        }
+    }
+
+    return WAFER_SUCCESS;
+}
+
+int Wafer_CalibrateReflectanceLut(
+    const unsigned char** image_buffers,
+    int width,
+    int height,
+    const WaferReflectanceLutConfig* config,
+    WaferReflectanceLutResult* out_result,
+    unsigned char* result_bgr
+) {
+    if (!image_buffers || width <= 0 || height <= 0 || !out_result) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    std::vector<cv::Mat> images;
+    images.reserve(4);
+    for (int i = 0; i < 4; ++i) {
+        if (!image_buffers[i]) {
+            return WAFER_ERR_IMAGE_EMPTY;
+        }
+        images.push_back(cv::Mat(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i])));
+    }
+
+    wafer_calib::ReflectanceLutConfig cpp_cfg;
+    if (config) {
+        cpp_cfg.mode = (config->lut_mode == 1) ? wafer_calib::WAFER_LUT_MODE_SMOOTH : wafer_calib::WAFER_LUT_MODE_DEADBAND;
+        cpp_cfg.roi_center_width = config->roi_center_width;
+        cpp_cfg.roi_center_height = config->roi_center_height;
+        cpp_cfg.deadband_width = config->deadband_width;
+        for (int k = 0; k < 4; ++k) {
+            if (config->target_values[k] > 0.0) {
+                cpp_cfg.target_values[k] = config->target_values[k];
+            }
+        }
+    }
+
+    wafer_calib::ReflectanceLutResult cpp_res;
+    cv::Mat diagnostic;
+    cv::Mat* diag_ptr = result_bgr ? &diagnostic : nullptr;
+
+    if (!wafer_calib::WaferReflectanceLutCalibrator::Calibrate(images, cpp_cfg, cpp_res, diag_ptr)) {
+        return WAFER_ERR_FITTING_FAILED;
+    }
+
+    // 拷贝结果
+    std::memcpy(out_result->lut, cpp_res.lut, 256);
+    for (int k = 0; k < 4; ++k) {
+        out_result->measured_peaks[k] = cpp_res.measured_peaks[k];
+        out_result->target_values[k] = cpp_res.target_values[k];
+    }
+    out_result->raw_linearity_r2 = cpp_res.raw_linearity_r2;
+    out_result->corrected_linearity_r2 = cpp_res.corrected_linearity_r2;
+
+    if (result_bgr && !diagnostic.empty()) {
+        const int diag_w = 2048;
+        const int diag_h = 1536;
+        if (diagnostic.cols == diag_w && diagnostic.rows == diag_h) {
+            std::memcpy(result_bgr, diagnostic.data, diag_w * diag_h * 3);
+        } else {
+            cv::Mat resized;
+            cv::resize(diagnostic, resized, cv::Size(diag_w, diag_h));
+            std::memcpy(result_bgr, resized.data, diag_w * diag_h * 3);
+        }
+    }
+
+    return WAFER_SUCCESS;
+}
+
+int Wafer_CalibrateReflectanceLutFromFiles(
+    const char** file_paths,
+    const WaferReflectanceLutConfig* config,
+    WaferReflectanceLutResult* out_result,
+    const char* save_diagnostic_image_path
+) {
+    if (!file_paths) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    std::vector<cv::Mat> images;
+    images.reserve(4);
+    for (int i = 0; i < 4; ++i) {
+        if (!file_paths[i]) {
+            return WAFER_ERR_INVALID_PARAM;
+        }
+        cv::Mat img = wafer_calib::readImageUnicode(file_paths[i], cv::IMREAD_GRAYSCALE);
+        if (img.empty()) {
+            return WAFER_ERR_FILE_IO;
+        }
+        images.push_back(img);
+    }
+
+    wafer_calib::ReflectanceLutConfig cpp_cfg;
+    if (config) {
+        cpp_cfg.mode = (config->lut_mode == 1) ? wafer_calib::WAFER_LUT_MODE_SMOOTH : wafer_calib::WAFER_LUT_MODE_DEADBAND;
+        cpp_cfg.roi_center_width = config->roi_center_width;
+        cpp_cfg.roi_center_height = config->roi_center_height;
+        cpp_cfg.deadband_width = config->deadband_width;
+        for (int k = 0; k < 4; ++k) {
+            if (config->target_values[k] > 0.0) {
+                cpp_cfg.target_values[k] = config->target_values[k];
+            }
+        }
+    }
+
+    wafer_calib::ReflectanceLutResult cpp_res;
+    cv::Mat diagnostic;
+    cv::Mat* diag_ptr = (save_diagnostic_image_path && save_diagnostic_image_path[0] != '\0') ? &diagnostic : nullptr;
+
+    if (!wafer_calib::WaferReflectanceLutCalibrator::Calibrate(images, cpp_cfg, cpp_res, diag_ptr)) {
+        return WAFER_ERR_FITTING_FAILED;
+    }
+
+    if (out_result) {
+        std::memcpy(out_result->lut, cpp_res.lut, 256);
+        for (int k = 0; k < 4; ++k) {
+            out_result->measured_peaks[k] = cpp_res.measured_peaks[k];
+            out_result->target_values[k] = cpp_res.target_values[k];
+        }
+        out_result->raw_linearity_r2 = cpp_res.raw_linearity_r2;
+        out_result->corrected_linearity_r2 = cpp_res.corrected_linearity_r2;
+    }
+
+    if (save_diagnostic_image_path && save_diagnostic_image_path[0] != '\0' && !diagnostic.empty()) {
+        if (!wafer_calib::writeImageUnicode(save_diagnostic_image_path, diagnostic)) {
+            return WAFER_ERR_FILE_IO;
+        }
+    }
+
+    return WAFER_SUCCESS;
+}
+
+int Wafer_ApplyLutToImage(
+    const unsigned char* src_mono8,
+    int width,
+    int height,
+    const unsigned char* lut_256,
+    unsigned char* dst_mono8
+) {
+    if (!src_mono8 || !lut_256 || !dst_mono8 || width <= 0 || height <= 0) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    cv::Mat src(height, width, CV_8UC1, const_cast<unsigned char*>(src_mono8));
+    cv::Mat dst(height, width, CV_8UC1, dst_mono8);
+
+    if (!wafer_calib::WaferReflectanceLutCalibrator::ApplyLut(src, dst, lut_256)) {
+        return WAFER_ERR_UNKNOWN;
+    }
+
+    return WAFER_SUCCESS;
+}
+
+int Wafer_SaveLutToFile(
+    const char* file_path,
+    const unsigned char* lut_256
+) {
+    if (!file_path || !lut_256) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+    if (!wafer_calib::WaferReflectanceLutCalibrator::SaveLut(file_path, lut_256)) {
+        return WAFER_ERR_FILE_IO;
+    }
+    return WAFER_SUCCESS;
+}
+
+int Wafer_LoadLutFromFile(
+    const char* file_path,
+    unsigned char* lut_256
+) {
+    if (!file_path || !lut_256) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+    if (!wafer_calib::WaferReflectanceLutCalibrator::LoadLut(file_path, lut_256)) {
+        return WAFER_ERR_FILE_IO;
+    }
+    return WAFER_SUCCESS;
+}
+
 } // extern "C"
+

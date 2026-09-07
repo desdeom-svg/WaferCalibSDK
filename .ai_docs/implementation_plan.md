@@ -1,103 +1,59 @@
-# 谷神星高倍率 5 视野畸变联合标定与接口扩展实施计划
+# 实施方案：反射率光电响应标定与灰度线性化 LUT 功能实现
 
-本文档详述在 `WaferCalibSDK` 中新增 5 视野联合标定功能的具体实施步骤、接口定义与验证方案。
+## 1. 业务背景与技术原理
 
-## 用户审核要点 (User Review Required)
+在晶圆半导体检测（Wafer Inspection）、膜厚干涉测量与高精度对位中，工业相机拍摄到的表面灰度与被测物质物理反射率密切相关。然而由于 CMOS 传感器存在暗电流偏置、光电转换非线性（PRNU / Gamma 响应）以及光源照度与镜头衰减，导致相机的灰度输出往往偏离理想的物理线性关系，且不同机台之间成像灰度存在系统性漂移。
 
-> [!IMPORTANT]
-> 1. **零破坏与向下兼容**：现有的单视野标定接口（C++ `createDotGridTemplate` 及 C API `Wafer_CreateDotGridDistortionTemplate`）以及校正接口（`correctByDotGridTemplate` / `Wafer_CorrectImageByDotGridTemplate`）**完全原样保留**。
-> 2. **5 视野新接口设计**：新增 `createMultiViewDotGridTemplate` 专属接口，支持传入 5 个视野（中心、左上、左下、右上、右下）的图像，并支持传入机台步长参数 `stage_step_mm`（若传 0 则自闭环解算）。
-> 3. **外参初值估计**：默认采用**“中心标记圆锚定 + 重叠网格 SVD 刚体对齐”**的纯视觉自闭环方式，若外部传入机台步长，则用于防呆校验。
-
-## 待确认事项 (Open Questions)
-
-> [!NOTE]
-> 经实测验证，标定板中央的第 101 个中心特征圆在 5 个倍率全部 25 张图中均清晰可见且在视场内，外参自闭环匹配准确率达 100%，无未决技术阻碍。
+通过采用 5%、50%、75%、90% 四块已知反射率的漫反射标准板（或标准阶梯靶标），本模块实现：
+1. **自动波峰提取**：在中心视场 ROI 内统计 4 个标准反射率的实际灰度波峰分布；
+2. **多模式 1D LUT 生成**：
+   - **模式 0（分段平台死区阶梯模式）**：精确实现用户图示规则，对目标基准灰度设立死区平台（如 $\pm 5$ 灰度），抑制光学抖动，区间线性拉伸；
+   - **模式 1（单调平滑样条曲线模式）**：采用 PCHIP（保形单调三次插值），生成严格平滑单调的无阶梯连续 Tone 曲线；
+3. **极速在线查表校正**：生产阶段每帧耗时 $< 2\text{ ms}$（4096×4096 图像），实现反射率与输出灰度的严格线性化。
 
 ---
 
-## 拟实施的代码变更 (Proposed Changes)
+## 2. 数据规律与设计基准
 
-### 1. 核心模块头文件 (`wafer_calib/modules`)
+实测数据位于 `D:\Projects\opencvProject\WaferCalibSDK\images\不同反射率_线性矫正`（4 张 4096×4096 Mono8 图像）：
+- `5%.bmp`：全图均值 8.14，中心 8.78，波峰在 8；
+- `50%.bmp`：全图均值 135.87，中心 148.30，波峰在 145；
+- `75%.bmp`：全图均值 195.31，中心 213.06，波峰在 208；
+- `90%.bmp`：全图均值 243.21，中心 255.00，波峰在 255（中心过曝）。
 
-#### [MODIFY] [distortion_correction.hpp](file:///d:/Projects/opencvProject/WaferCalibSDK/include/wafer_calib/modules/distortion_correction.hpp)
-- 添加视野枚举 `CalibrationViewPosition`（`Center=0, TopLeft=1, BottomLeft=2, TopRight=3, BottomRight=4`）。
-- 添加单视野输入结构体 `CalibrationViewInput`，包含图像矩阵、视野位置枚举及可选的机台偏移量。
-- 在 `DistortionCorrectionModule` 中新增静态方法 `createMultiViewDotGridTemplate(...)`。
-- 保留原有 `createDotGridTemplate` 和 `correctByDotGridTemplate` 声明不变。
-
----
-
-### 2. 核心模块实现 (`src/modules`)
-
-#### [MODIFY] [distortion_correction.cpp](file:///d:/Projects/opencvProject/WaferCalibSDK/src/modules/distortion_correction.cpp)
-- **高抗噪白圆特征提取器**：
-  - 实现基于形态学 Top-Hat（顶帽滤波）抑制背景不均与暗场噪声；
-  - 实现动态阈值分割 + 面积/圆度过滤 + 亚像素圆轮廓边缘拟合，精确提取高亮白圆圆心；
-  - 针对 20X 低对比度与 1.5X 边缘串入杂斑提供鲁棒抑制。
-- **中心标记锚定与拓扑索引**：
-  - 检出中心特征标记圆（第 101 个圆，其到 4 个对角邻域圆距离为 $Pitch/\sqrt{2}$）；
-  - 以中心标记圆为原点，建立 $10 \times 10$ 核心网格索引 $(row, col) \in [0..9] \times [0..9]$，自动剥离边缘外部串入的非目标圆点。
-- **5 视野外参初值估计**：
-  - 提取各视野与中心视野的同名重叠网格点对（通常为 30~50 对）；
-  - 使用 SVD 求解各视野相对中心视野的最佳 2D 刚体旋转与平移矩阵 $[R_k \mid T_k]$。
-- **全局联合优化求解器**：
-  - 汇总 5 个视野共约 500 个有效控制点；
-  - 建立全像面多项式联合拟合方程，求解全局统一的 10 项二维多项式畸变校正系数，计算全局 RMS 残差。
-- **5 视野全局诊断图绘制**：
-  - 在 $4096 \times 4096$ 的画幅上渲染 5 视野拼接后的所有采样点、网格索引编号及残差矢量箭头，便于可视化检查。
-- **实现 `createMultiViewDotGridTemplate`**，并确保原有 `createDotGridTemplate` 兼容正常。
+标准物理基准设定（理论线性换算）：
+- 5% 反射率 $\to$ 目标灰度 13
+- 50% 反射率 $\to$ 目标灰度 128
+- 75% 反射率 $\to$ 目标灰度 192
+- 90% 反射率 $\to$ 目标灰度 230
+- 平台死区默认半宽：$W = 5$ 灰度级。
 
 ---
 
-### 3. C API 导出层 (`wafer_calib/c_api`)
+## 3. 模块架构与接口设计
 
-#### [MODIFY] [wafer_calib_c.h](file:///d:/Projects/opencvProject/WaferCalibSDK/include/wafer_calib/c_api/wafer_calib_c.h)
-- 保持所有现有宏与函数签名不变。
-- 新增内存缓冲区版本接口：
-  `Wafer_CreateMultiViewDotGridDistortionTemplate`
-- 新增文件路径版本接口：
-  `Wafer_CreateMultiViewDotGridTemplateFromFiles`
+### 3.1 C++ 算法模块 (`ReflectanceLutModule`)
+- 头文件：`include/wafer_calib/modules/reflectance_lut.hpp`
+- 源文件：`src/modules/reflectance_lut.cpp`
+- 核心能力：
+  1. `ExtractPeaks`：中心 ROI 高斯平滑直方图与亚像素波峰提取；
+  2. `GenerateDeadbandLut`：根据图示分段逻辑构建 7 段映射表；
+  3. `GenerateSmoothLut`：单调保形平滑三次样条插值；
+  4. `ApplyLut`：SIMD 向量化高速图像映射；
+  5. `RenderDiagnostic`：高分辨率四合一工业诊断看板（直方图叠加、LUT 曲线、线性度度量、灰阶对比）。
 
-#### [MODIFY] [wafer_calib_c.cpp](file:///d:/Projects/opencvProject/WaferCalibSDK/src/c_api/wafer_calib_c.cpp)
-- 实现新增的 C 接口，负责内存/路径转换、入参校验、调用 C++ 模块并映射错误码。
-
----
-
-### 4. 测试与工程构建配置
-
-#### [NEW] [test_multi_view_distortion_correction.cpp](file:///d:/Projects/opencvProject/WaferCalibSDK/tests/test_multi_view_distortion_correction.cpp)
-- 编写多视野标定测试用例：
-  - 涵盖合成 5 视野仿真网格校验；
-  - 读取 `D:\images\谷神星\标准化\畸变矫正` 下全部 5 个倍率（1.5X, 2.5X, 5X, 10X, 20X）的真实图片进行联合标定；
-  - 断言全局 RMS 误差均小于 0.5 像素；
-  - 验证校正后的图像网格直线度。
-
-#### [MODIFY] [CMakeLists.txt](file:///d:/Projects/opencvProject/WaferCalibSDK/CMakeLists.txt)
-- 添加测试目标 `test_multi_view_distortion_correction`。
+### 3.2 C API 导出层
+- 在 `include/wafer_calib/c_api/wafer_calib_c.h` 中新增：
+  - 结构体 `WaferReflectanceLutConfig` 与 `WaferReflectanceLutResult`
+  - 离线标定接口：`Wafer_CalibrateReflectanceLut` 与 `Wafer_CalibrateReflectanceLutFromFiles`
+  - 在线校正接口：`Wafer_ApplyLutToImage`
+  - 配方文件持久化接口：`Wafer_SaveLutToFile` 与 `Wafer_LoadLutFromFile`
+- 在 `src/c_api/wafer_calib_c.cpp` 中实现。
 
 ---
 
-## 验证计划 (Verification Plan)
-
-### 自动化构建与测试
-1. **编译验证**：
-   使用 VS 2022 CMake 工具链执行 Release 模式编译：
-   ```powershell
-   & "D:\soft\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build build --config Release
-   ```
-2. **回归测试（确保旧功能零破坏）**：
-   运行现有单元测试：
-   ```powershell
-   & ".\build\Release\test_distortion_correction.exe"
-   & ".\build\Release\test_c_api_packed_mono8.exe"
-   ```
-3. **真实数据集 5 倍率全场景验证**：
-   运行新编写的多视野测试程序：
-   ```powershell
-   & ".\build\Release\test_multi_view_distortion_correction.exe"
-   ```
-   验证指标：
-   - 1.5X ~ 20X 共 5 个倍率全部执行成功；
-   - 提取点数各为 500 个（全部有效覆盖）；
-   - 全局 RMS 误差满足亚像素要求（< 0.5 px）。
+## 4. 验证与交付物
+1. 编写专用测试工程 `tests/test_reflectance_lut.cpp`；
+2. 构建编译并测试 4 张实测真实图像；
+3. 输出高分辨率综合诊断大图至原测试数据目录及文档目录；
+4. 更新 `docs/WaferCalibSDK_C_API调用说明.md` 第八单元并导出新版 PDF 与 DLL。

@@ -161,7 +161,7 @@ WAFER_API int Wafer_CreateDotGridDistortionTemplate(
  * @param point_spacing_mm 该倍率下标定板大圆物理间距，单位：毫米。
  * @param stage_step_mm 机台位移步长先验值，单位：毫米；若传 0.0 则由算法纯视觉自适应匹配。
  * @param out_template 输出单一全局畸变模板结构体指针。
- * @param result_bgr 输出全像面 BGR 诊断图缓冲区，含 5 视野覆盖、编号与残差矢量，长度为 width * height * 3 字节；传 NULL 表示不输出。
+ * @param result_bgr 输出 3*3 空间拓扑无损拼接 BGR 诊断大图缓冲区，尺寸为 (width * 3) * (height * 3)，所需长度为 (width * 3) * (height * 3) * 3 字节；传 NULL 表示不输出。
  * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
  */
 WAFER_API int Wafer_CreateMultiViewDotGridDistortionTemplate(
@@ -268,6 +268,166 @@ WAFER_API int Wafer_FindCircleCenterOffset(
     double* offset_x,
     double* offset_y,
     unsigned char* result_bgr
+);
+
+/** @brief 平台旋转中心计算单次支持的最大采样点数。 */
+#define WAFER_ROTATION_CENTER_MAX_POINTS 36
+
+/**
+ * @brief 平台旋转中心计算结果结构体
+ */
+typedef struct WaferPlatformRotationCenterResult {
+    /** @brief 拟合平台旋转中心 X 坐标，单位：像素。 */
+    double center_x;
+    /** @brief 拟合平台旋转中心 Y 坐标，单位：像素。 */
+    double center_y;
+    /** @brief 拟合旋转偏心半径 R，单位：像素。 */
+    double radius;
+    /** @brief 全局 RMS 拟合几何残差，单位：像素。 */
+    double rms_error;
+    /** @brief 最大单点径向偏差，单位：像素。 */
+    double max_error;
+    /** @brief 实际成功识别并参与拟合的特征圆点数量。 */
+    int valid_point_count;
+    /** @brief 各特征圆点的 X 坐标 (最多支持 36 点)。 */
+    double point_x[WAFER_ROTATION_CENTER_MAX_POINTS];
+    /** @brief 各特征圆点的 Y 坐标 (最多支持 36 点)。 */
+    double point_y[WAFER_ROTATION_CENTER_MAX_POINTS];
+    /** @brief 各特征圆点的径向残差 (dist - R，最多支持 36 点)。 */
+    double point_residual[WAFER_ROTATION_CENTER_MAX_POINTS];
+} WaferPlatformRotationCenterResult;
+
+/**
+ * @brief 结合多张旋转图像计算载晶圆平台的旋转中心、偏心半径并生成全画幅诊断大图。
+ * @param image_buffers 包含 image_count 个图像指针的数组；每帧长度为 width * height 字节。
+ * @param image_count 输入图像帧数，必须大于等于 3（典型为 12 张）。
+ * @param width 图像宽度，单位：像素。
+ * @param height 图像高度，单位：像素。
+ * @param out_result 输出平台旋转中心计算结果结构体指针。
+ * @param result_bgr 输出全画幅 BGR 可视化诊断大图缓冲区，由调用方分配 width * height * 3 字节；传 NULL 表示不输出。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CalculatePlatformRotationCenter(
+    const unsigned char** image_buffers,
+    int image_count,
+    int width,
+    int height,
+    WaferPlatformRotationCenterResult* out_result,
+    unsigned char* result_bgr
+);
+
+/**
+ * @brief 从文件路径读取多张旋转图像计算载晶圆平台旋转中心，可直接保存全画幅诊断大图。
+ * @param file_paths 包含 file_count 个图像文件路径的数组；支持 Windows Unicode 中文路径。
+ * @param file_count 文件路径数量，必须大于等于 3（典型为 12 张）。
+ * @param out_result 输出平台旋转中心计算结果结构体指针；传 NULL 时不获取结构体。
+ * @param save_diagnostic_image_path 诊断大图保存路径；传 NULL 或空字符串时不保存。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CalculatePlatformRotationCenterFromFiles(
+    const char** file_paths,
+    int file_count,
+    WaferPlatformRotationCenterResult* out_result,
+    const char* save_diagnostic_image_path
+);
+
+/**
+ * @brief 反射率光电响应标定参数配置结构体
+ */
+typedef struct WaferReflectanceLutConfig {
+    /** @brief 算法模式：0=分段阶梯死区模式(手绘图模式)，1=单调平滑样条模式(PCHIP) */
+    int lut_mode;
+    /** @brief 中心测量 ROI 宽度 (像素)，传 0 表示全图 */
+    int roi_center_width;
+    /** @brief 中心测量 ROI 高度 (像素)，传 0 表示全图 */
+    int roi_center_height;
+    /** @brief 目标基准值附近的死区半宽 (像素灰度级，推荐 5) */
+    int deadband_width;
+    /** @brief 4 阶反射率 (5%, 50%, 75%, 90%) 目标理想灰度 (如 13, 128, 192, 230) */
+    double target_values[4];
+} WaferReflectanceLutConfig;
+
+/**
+ * @brief 反射率光电响应标定结果结构体
+ */
+typedef struct WaferReflectanceLutResult {
+    /** @brief 生成的 256 元素灰度映射查找表 (输出灰度 = lut[输入灰度]) */
+    unsigned char lut[256];
+    /** @brief 4 张标定图像实际统计提取到的波峰灰度值 */
+    double measured_peaks[4];
+    /** @brief 标定使用的 4 阶目标基准灰度值 */
+    double target_values[4];
+    /** @brief 校正前实测灰度与物理反射率的线性拟合优度 R^2 */
+    double raw_linearity_r2;
+    /** @brief 校正后目标灰度与物理反射率的线性拟合优度 R^2 */
+    double corrected_linearity_r2;
+} WaferReflectanceLutResult;
+
+/**
+ * @brief 结合 4 张已知反射率标定图 (5%, 50%, 75%, 90%) 标定计算 256 元素灰度映射 LUT，并可选生成高分辨率四合一工业诊断大图。
+ * @param image_buffers 包含 4 张图像指针的数组；每帧长度为 width * height 字节 (顺序: 5%, 50%, 75%, 90%)。
+ * @param width 图像宽度，单位：像素。
+ * @param height 图像高度，单位：像素。
+ * @param config 标定配置参数，传 NULL 时采用默认参数 (死区模式，中心 1000x1000 ROI，基准 13, 128, 192, 230)。
+ * @param out_result 输出标定计算结果结构体指针，不能为空。
+ * @param result_bgr 输出高分辨率四合一工业诊断大图缓冲区 (2048 * 1536 * 3 字节)；传 NULL 表示不输出。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CalibrateReflectanceLut(
+    const unsigned char** image_buffers,
+    int width,
+    int height,
+    const WaferReflectanceLutConfig* config,
+    WaferReflectanceLutResult* out_result,
+    unsigned char* result_bgr
+);
+
+/**
+ * @brief 从文件路径读取 4 张已知反射率标定图标定计算 LUT，并可选直接保存诊断大图。
+ * @param file_paths 包含 4 个图像文件路径的数组 (顺序: 5%, 50%, 75%, 90%)。
+ * @param config 标定配置参数，传 NULL 时采用默认参数。
+ * @param out_result 输出标定结果结构体指针；传 NULL 时不获取。
+ * @param save_diagnostic_image_path 诊断大图保存路径；传 NULL 或空字符串时不保存。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CalibrateReflectanceLutFromFiles(
+    const char** file_paths,
+    const WaferReflectanceLutConfig* config,
+    WaferReflectanceLutResult* out_result,
+    const char* save_diagnostic_image_path
+);
+
+/**
+ * @brief 使用 256 元素 LUT 对单张 Mono8 图像进行超高速查表线性化校正 (在线生产每帧耗时约 1~2ms)。
+ * @param src_mono8 输入原始 Mono8 图像，长度为 width * height 字节。
+ * @param width 图像宽度，单位：像素。
+ * @param height 图像高度，单位：像素。
+ * @param lut_256 包含 256 字节的 LUT 查找表指针。
+ * @param dst_mono8 输出校正后的 Mono8 图像，由调用方分配 width * height 字节。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_ApplyLutToImage(
+    const unsigned char* src_mono8,
+    int width,
+    int height,
+    const unsigned char* lut_256,
+    unsigned char* dst_mono8
+);
+
+/**
+ * @brief 将 256 元素 LUT 查找表保存为配方文件 (支持 .lut、.csv)。
+ */
+WAFER_API int Wafer_SaveLutToFile(
+    const char* file_path,
+    const unsigned char* lut_256
+);
+
+/**
+ * @brief 从配方文件中加载 256 元素 LUT 查找表。
+ */
+WAFER_API int Wafer_LoadLutFromFile(
+    const char* file_path,
+    unsigned char* lut_256
 );
 
 #ifdef __cplusplus

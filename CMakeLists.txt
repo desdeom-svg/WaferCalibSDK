@@ -71,4 +71,8 @@ target_link_libraries(test_circle_center_offset PRIVATE WaferCalibSDK ${OpenCV_L
 add_executable(circle_center_offset_tool tools/circle_center_offset_tool.cpp)
 target_link_libraries(circle_center_offset_tool PRIVATE WaferCalibSDK ${OpenCV_LIBS})
 
+add_executable(test_platform_rotation_center tests/test_platform_rotation_center.cpp)
+target_link_libraries(test_platform_rotation_center PRIVATE WaferCalibSDK ${OpenCV_LIBS})
 
+add_executable(test_reflectance_lut tests/test_reflectance_lut.cpp)
+target_link_libraries(test_reflectance_lut PRIVATE WaferCalibSDK ${OpenCV_LIBS})
