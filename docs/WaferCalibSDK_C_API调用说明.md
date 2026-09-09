@@ -23,9 +23,11 @@
   - [3.4 实测效果展示](#34-实测效果展示)
 - [四、 水平标定线角度检测功能 (LineAngle)](#四-水平标定线角度检测功能-lineangle)
   - [4.1 业务场景与技术原理](#41-业务场景与技术原理)
-  - [4.2 核心接口说明 (Wafer_FindHorizontalLineAngle)](#42-核心接口说明-wafer_findhorizontallineangle)
+  - [4.2 核心接口说明 (Wafer_FindHorizontalLineAngle 单视野检测)](#42-核心接口说明-wafer_findhorizontallineangle-单视野检测)
   - [4.3 C# 调用代码示例](#43-c-调用代码示例)
-  - [4.4 实测效果展示](#44-实测效果展示)
+  - [4.4 单视野实测效果展示](#44-单视野实测效果展示)
+  - [4.5 跨双视野大基线全局角度检测 (Wafer_FindTwoViewHorizontalLineAngle)](#45-跨双视野大基线全局角度检测-wafer_findtwoviewhorizontallineangle)
+  - [4.6 双视野综合诊断看板大图 (3000 × 1800)](#46-双视野综合诊断看板大图-3000--1800)
 - [五、 镜头畸变校正功能 (DistortionCorrection)](#五-镜头畸变校正功能-distortioncorrection)
   - [5.1 业务场景与技术架构](#51-业务场景与技术架构)
   - [5.2 核心数据结构：WaferDotGridDistortionTemplate](#52-核心数据结构waferdotgriddistortiontemplate)
@@ -55,6 +57,12 @@
   - [8.3 核心接口说明 (Wafer_CalibrateReflectanceLut 与 Wafer_ApplyLutToImage)](#83-核心接口说明-wafer_calibratereflectancelut-与-wafer_applyluttoimage)
   - [8.4 C# 调用代码示例](#84-c-调用代码示例)
   - [8.5 实测标定与综合诊断大图展示](#85-实测标定与综合诊断大图展示)
+- [九、 9点标定与在线坐标转换功能 (AxisPixelCalibration)](#九-9点标定与在线坐标转换功能-axispixelcalibration)
+  - [9.1 业务场景与走位轨迹拓扑推导](#91-业务场景与走位轨迹拓扑推导)
+  - [9.2 业务调用流程与极简设计逻辑 (无句柄透明缓存)](#92-业务调用流程与极简设计逻辑-无句柄透明缓存)
+  - [9.3 核心接口说明 (极简 3 接口参数详解)](#93-核心接口说明-极简-3-接口参数详解)
+  - [9.4 C# 调用代码示例 (纯内存流与在线对位)](#94-c-调用代码示例-纯内存流与在线对位)
+  - [9.5 实测标定与综合诊断大图展示](#95-实测标定与综合诊断大图展示)
 - [附录：C++ 原生模块架构参考](#附录c-原生模块架构参考)
 
 ---
@@ -158,7 +166,7 @@ namespace WaferVisionSystem.Interop {
             IntPtr resultBgr
         );
 
-        // 3. 水平标定线角度检测
+        // 3.1 水平标定线单视野角度检测
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int Wafer_FindHorizontalLineAngle(
             IntPtr imageBuffer,
@@ -166,6 +174,23 @@ namespace WaferVisionSystem.Interop {
             int height,
             out double angleDegrees,
             IntPtr resultBgr
+        );
+
+        // 3.2 跨双视野大基线高精度水平标定线全局角度检测
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int Wafer_FindTwoViewHorizontalLineAngle(
+            IntPtr mono8View1,
+            IntPtr mono8View2,
+            int width,
+            int height,
+            double stageDeltaXMm,
+            double pixelScaleYUm,
+            out double outGlobalAngleDeg,
+            out double outView1AngleDeg,
+            out double outView2AngleDeg,
+            IntPtr diagnosticBgr,
+            int diagWidth,
+            int diagHeight
         );
 
         // 4.1 畸变校正 - 单视野点阵标定
@@ -325,6 +350,44 @@ namespace WaferVisionSystem.Interop {
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         public static extern int Wafer_LoadLutFromFile(string filePath, byte[] lut256);
+
+        // 10. 9点标定计算 (极简接口：传入初始坐标与步长，直接输出 X/Y 像元物理当量，自动导出配方 JSON 与诊断大图)
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int Wafer_CalibrateAxisPixelGrid(
+            IntPtr[] mono8Buffers,
+            int imageCount,
+            int width,
+            int height,
+            double initialAxisX,
+            double initialAxisY,
+            double stepSizeMm,
+            string outputCalibJsonPath,
+            out double outPixelScaleXUm,
+            out double outPixelScaleYUm,
+            IntPtr diagnosticBgr,
+            int diagWidth,
+            int diagHeight
+        );
+
+        // 11. 在线高速坐标正变换 (像素 -> 轴，底层基于修改时间戳透明内存缓存，无需管理句柄)
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int Wafer_TransformPixelToAxis(
+            string calibJsonPath,
+            double u,
+            double v,
+            out double outAxisX,
+            out double outAxisY
+        );
+
+        // 12. 在线高速坐标逆变换 (轴 -> 像素，底层基于修改时间戳透明内存缓存，无需管理句柄)
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int Wafer_TransformAxisToPixel(
+            string calibJsonPath,
+            double axisX,
+            double axisY,
+            out double outU,
+            out double outV
+        );
     }
 }
 ```
@@ -566,12 +629,140 @@ public class LineAngleDemo {
 }
 ```
 
-### 4.4 实测效果展示
+### 4.4 单视野实测效果展示
 
 | 水平基准线提取与高精度角度检测诊断图 |
 |:---:|
 | ![水平标定线检测标注图](images/line_angle_output.png) |
 | *绿线为 RANSAC 鲁棒拟合直线，实时输出极小微米级倾角偏差* |
+
+### 4.5 跨双视野大基线全局角度检测 (Wafer_FindTwoViewHorizontalLineAngle)
+
+#### 4.5.1 业务场景与技术原理
+
+在超高精度的半导体晶圆校平与旋转粗/精对位工序中，若仅使用单个局部视场（如 4096 像素，在约 $0.9009\ \mu\text{m/px}$ 像元下视场仅约 3.69 mm）来估算晶圆标定线角度，单像素采样跳动或边缘粗糙度会对角度带来约 $\pm 0.01^\circ \sim 0.03^\circ$ 的不确定度。
+
+为了突破单视场的光学尺寸物理局限，本接口支持**大基线跨视场对准测角**：
+1. **工作模式**：机台相机固定，机械载物台沿 X 轴方向平移大跨距物理行程（例如 $\Delta X_{\text{stage}} = 285.000\text{ mm}$），在标定板或晶圆上的同一条水平线上分别拍摄最左端起点【视野 1】与最右端终点【视野 2】；
+2. **机台约束**：由于机台在此过程中 Y 轴保持静止锁定，因此**无需传入任何 Y 轴位移参数**；
+3. **几何解算**：
+   - 算法在视野 1 提取亚像素直线，求出其在图像中心列 $u_c = W/2$ 处的精确像面高度 $v_1$；
+   - 算法在视野 2 提取亚像素直线，求出其在图像中心列 $u_c = W/2$ 处的精确像面高度 $v_2$；
+   - 两视野中心测点之间的像面垂直落差为 $\Delta v = v_2 - v_1$（像素）；
+   - 结合垂直方向像元当量 $s_y = \text{pixel\_scale\_y\_um} / 1000.0$（mm/px，可直接取自 9 点标定输出参数），换算得到物理世界垂直落差：
+     $$\Delta Y_{\text{world}} = -(v_2 - v_1) \times \left(\frac{\text{pixel\_scale\_y\_um}}{1000.0}\right) \quad (\text{mm})$$
+   - 结合机械 X 轴位移 $\Delta X_{\text{stage}}$（mm），解算超长基线下的全局绝对倾角：
+     $$\Theta_{\text{global}} = \arctan\left(\frac{\Delta Y_{\text{world}}}{\Delta X_{\text{stage}}}\right) \times \frac{180}{\pi} \quad (\text{度})$$
+     $$\Theta_{\text{arcmin}} = \Theta_{\text{global}} \times 60 \quad (\text{角分})$$
+4. **精度增益**：
+   基线跨度由单图视场 3.69 mm 扩展至 285 mm，**几何测角信噪比与抗像元离散误差能力提升了约 77 倍**！测角精度直接进入角秒/超微米级。
+
+#### 4.5.2 核心接口说明 (Wafer_FindTwoViewHorizontalLineAngle)
+
+```c
+int Wafer_FindTwoViewHorizontalLineAngle(
+    const unsigned char* mono8_view1,
+    const unsigned char* mono8_view2,
+    int width,
+    int height,
+    double stage_delta_x_mm,
+    double pixel_scale_y_um,
+    double* out_global_angle_deg,
+    double* out_view1_angle_deg,
+    double* out_view2_angle_deg,
+    unsigned char* diagnostic_bgr,
+    int diag_width,
+    int diag_height
+);
+```
+
+#### 参数详解
+
+| 参数名 | 传递方向 | 数据类型 | 说明 |
+|---|---|---|---|
+| `mono8_view1` | 输入 | `const unsigned char*` | 视野 1 (最左端起点) Mono8 图像指针，长度为 `width * height` 字节。 |
+| `mono8_view2` | 输入 | `const unsigned char*` | 视野 2 (最右端终点) Mono8 图像指针，长度为 `width * height` 字节。 |
+| `width` | 输入 | `int` | 图像宽度（像素，如 4096）。 |
+| `height` | 输入 | `int` | 图像高度（像素，如 4096）。 |
+| `stage_delta_x_mm` | 输入 | `double` | 机械 X 轴从视野 1 平移至视野 2 的物理位移绝对跨度（mm，如 285.000）。 |
+| `pixel_scale_y_um` | 输入 | `double` | 像元垂直方向物理当量（微米/像素，如 0.9009，可直接由 9 点标定接口输出）。 |
+| `out_global_angle_deg` | 输出 | `double*` | 输出：跨双视野大基线超高精度全局角度（度，范围 [-90, 90)）。 |
+| `out_view1_angle_deg` | 输出 | `double*` | 可选输出：视野 1 单图局部拟合角度（度）；传 NULL 则忽略。 |
+| `out_view2_angle_deg` | 输出 | `double*` | 可选输出：视野 2 单图局部拟合角度（度）；传 NULL 则忽略。 |
+| `diagnostic_bgr` | 输出 | `unsigned char*` | 可选输出：双视野联合对齐综合诊断看板大图缓冲区（3 通道 BGR，大小为 `diag_width * diag_height * 3` 字节）；传 NULL 表示不生成，零耗时零开销。 |
+| `diag_width` | 输入 | `int` | 诊断大图宽度（**推荐工业标准看板尺寸：3000**）。 |
+| `diag_height` | 输入 | `int` | 诊断大图高度（**推荐工业标准看板尺寸：1800**）。 |
+
+#### 4.5.3 C# 调用代码示例
+
+```csharp
+using System;
+using System.Runtime.InteropServices;
+using WaferVisionSystem.Interop;
+
+public class TwoViewLineAngleDemo {
+    public static void MeasureLongBaselineGlobalAngle(
+        IntPtr view1Ptr, IntPtr view2Ptr, int width, int height) {
+        
+        // 工况参数：机械 X 轴移动 285 mm，像元 Y 当量 0.9009 um/px
+        double stageDeltaXMm = 285.000;
+        double pixelScaleYUm = 0.9009;
+
+        // 诊断大图推荐尺寸：3000 x 1800 (BGR 3通道，约 16.2 MB)
+        int diagWidth = 3000;
+        int diagHeight = 1800;
+        int diagBufferSize = diagWidth * diagHeight * 3;
+        IntPtr diagBgrPtr = Marshal.AllocHGlobal(diagBufferSize);
+
+        try {
+            int ret = WaferCalibNative.Wafer_FindTwoViewHorizontalLineAngle(
+                view1Ptr,
+                view2Ptr,
+                width,
+                height,
+                stageDeltaXMm,
+                pixelScaleYUm,
+                out double globalAngleDeg,
+                out double view1AngleDeg,
+                out double view2AngleDeg,
+                diagBgrPtr,
+                diagWidth,
+                diagHeight
+            );
+
+            if (ret != WaferCalibNative.WAFER_SUCCESS) {
+                throw new Exception($"双视野大基线标定线测角失败，错误码: {ret}");
+            }
+
+            double globalArcmin = globalAngleDeg * 60.0;
+            Console.WriteLine($"[大基线测角成功]");
+            Console.WriteLine($"  全局大基线直线角度: {globalAngleDeg:F4}° ({globalArcmin:F2} 角分)");
+            Console.WriteLine($"  左端视野1单图角度:  {view1AngleDeg:F4}°");
+            Console.WriteLine($"  右端视野2单图角度:  {view2AngleDeg:F4}°");
+            Console.WriteLine($"  两端局部一致性偏差: {Math.Abs(view1AngleDeg - view2AngleDeg):F4}°");
+
+            // 可将 diagBgrPtr 写入位图或送入工控大屏 PictureBox 显示
+        } finally {
+            Marshal.FreeHGlobal(diagBgrPtr);
+        }
+    }
+}
+```
+
+### 4.6 双视野综合诊断看板大图 (3000 × 1800)
+
+针对 4096×4096 高分辨率图像，直接并排（8192×4096）将产生高达 100MB 内存开销并引起工控界面渲染卡顿。本 SDK 精心打造了 **`3000 × 1800` 工业级宽屏全景综合看板**：
+- **顶部 HUD 状态栏**：醒目绿色大字呈现全局角度与角分值、通过状态、两端单视野局部角度与一致性偏差；
+- **主体双视口对比区**：
+  - 左通道：展示视野 1 全景缩略图及直线走向 + 中心测点亚像素 1:1 ROI 特写图（标明 $v_1 = 2145.19\text{ px}$）；
+  - 右通道：展示视野 2 全景缩略图及直线走向 + 中心测点亚像素 1:1 ROI 特写图（标明 $v_2 = 403.85\text{ px}$）；
+  - 中间对齐桥：直观标尺与双向箭头展示垂直像面落差 $\Delta v = -1741.3\text{ px}$ 与物理落差 $\Delta Y = +1.569\text{ mm}$；
+- **底部指标卡片区**：详细列出机械行程、像元分辨率当量、空间落差、解算公式展开与 77 倍基线信噪比增益。
+
+| 跨双视野大基线水平标定线联合对齐综合诊断看板大图 (3000 × 1800) |
+|:---:|
+| ![双视野大基线标定线对齐看板大图](images/two_view_line_angle_diag_3000x1800.jpg) |
+| *实测 4096×4096 双视野解算：全局大基线角度 0.3154° (18.92 角分)，基线跨度 285mm，像面落差 -1741.35px* |
 
 ---
 
@@ -1341,6 +1532,225 @@ public class ReflectanceLutService {
 
 ---
 
+## 九、 9点标定与在线坐标转换功能 (AxisPixelCalibration)
+
+### 9.1 业务场景与走位轨迹拓扑推导
+
+在晶圆微观检测设备（如“谷神星”系列）中，高精度物理运动台（XY Table）承载晶圆，定倍率显微物镜与高分辨率工业相机（如 4096×4096 Mono8）用于成像。
+为了实现视觉引导对位（如将晶圆上的缺陷/特征点精准移动到视场中心）、物理量测（将像素距离换算为微米）以及多视场拼接，必须精确标定**相机图像坐标系（Pixel $(u, v)$）**与**机械轴运动坐标系（Axis $(X, Y)$）**之间的映射关系。
+
+#### 9.1.1 9点微标图像亚像素特征提取实测数据
+针对实际采集的 9 张 4096×4096 图像（位于 `D:\images\谷神星\标准化\AxisPixelCalibration\Mark_0.bmp` ~ `Mark_8.bmp`），算法通过高精度径向梯度边缘拟合微标小圆亚像素中心，实测数据如下：
+
+| 图像序号 | 像面像素坐标 $(u, v)$ | 微标圆半径 (px) | 相对 Mark_0 偏移 $(\Delta u, \Delta v)$ | 视场拓扑方位 | 网格相对偏置 $(\Delta k_x, \Delta k_y)$ |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Mark_0** | **(2051.95, 2039.01)** | 26.77 | $(0.00, 0.00)$ | **中心基准点 (Center)** | $(0, 0)$ |
+| **Mark_1** | **(218.01, 2034.75)** | 26.79 | $(-1833.93, -4.26)$ | **正西 (West / Left)** | $(-1, 0)$ |
+| **Mark_2** | **(214.44, 3868.25)** | 26.72 | $(-1837.51, +1829.23)$ | **西南 (South-West / Bot-Left)** | $(-1, +1)$ |
+| **Mark_3** | **(2046.20, 3869.87)** | 26.66 | $(-5.75, +1830.86)$ | **正南 (South / Bot)** | $(0, +1)$ |
+| **Mark_4** | **(3879.62, 3873.13)** | 26.82 | $(+1827.68, +1834.12)$ | **东南 (South-East / Bot-Right)** | $(+1, +1)$ |
+| **Mark_5** | **(3883.65, 2041.30)** | 26.88 | $(+1831.70, +2.29)$ | **正东 (East / Right)** | $(+1, 0)$ |
+| **Mark_6** | **(3888.26, 210.47)** | 26.53 | $(+1836.32, -1828.54)$ | **东北 (North-East / Top-Right)** | $(+1, -1)$ |
+| **Mark_7** | **(2054.85, 207.77)** | 26.68 | $(+2.90, -1831.25)$ | **正北 (North / Top)** | $(0, -1)$ |
+| **Mark_8** | **(223.52, 204.08)** | 26.79 | $(-1828.42, -1834.93)$ | **西北 (North-West / Top-Left)** | $(-1, -1)$ |
+
+#### 9.1.2 运动轨迹与拓扑规律推导
+分析相邻图片之间的运动位移：
+- $0 \to 1$: $\Delta u = -1833.93\text{ px}, \Delta v = -4.26\text{ px} \implies$ **纯向西移动 1 步 (1833.93 px)**
+- $1 \to 2$: $\Delta u = -3.58\text{ px}, \Delta v = +1833.49\text{ px} \implies$ **纯向南移动 1 步 (1833.50 px)**
+- $2 \to 3$: $\Delta u = +1831.76\text{ px}, \Delta v = +1.62\text{ px} \implies$ **纯向东移动 1 步 (1831.76 px)**
+- $3 \to 4$: $\Delta u = +1833.43\text{ px}, \Delta v = +3.26\text{ px} \implies$ **纯向东移动 1 步 (1833.43 px)**
+- $4 \to 5$: $\Delta u = +4.02\text{ px}, \Delta v = -1831.83\text{ px} \implies$ **纯向北移动 1 步 (1831.83 px)**
+- $5 \to 6$: $\Delta u = +4.61\text{ px}, \Delta v = -1830.83\text{ px} \implies$ **纯向北移动 1 步 (1830.84 px)**
+- $6 \to 7$: $\Delta u = -1833.41\text{ px}, \Delta v = -2.71\text{ px} \implies$ **纯向西移动 1 步 (1833.41 px)**
+- $7 \to 8$: $\Delta u = -1831.33\text{ px}, \Delta v = -3.68\text{ px} \implies$ **纯向西移动 1 步 (1831.33 px)**
+
+**拓扑走位结论**：
+1. **外周环绕闭环轨迹**：运动台以**中心 Mark_0 为基准出发，逆时针沿 8 邻域外周连续单步环绕扫描**（Perimeter Loop 轨迹）：
+   `中心(0) -> 西(1) -> 西南(2) -> 南(3) -> 东南(4) -> 东(5) -> 东北(6) -> 北(7) -> 西北(8)`；
+2. **曼哈顿单步极短行程**：相邻图片每一次步进的物理移动距离**严格恒定为单个步长（$1.65\text{ mm}$，像素跨度 $1832 \pm 2\text{ px}$）**。无对角线斜跳，无长行程回退，运动平稳性最优；
+3. **像元物理尺寸**：
+   $$Scale \approx \frac{1.65\text{ mm}}{1831.5\text{ px}} \approx 0.0009009\text{ mm/px} = 0.9009\ \mu\text{m/pixel}$$
+
+---
+
+### 9.2 业务调用流程与极简设计逻辑 (无句柄透明缓存)
+
+针对上层 C# 及工业自动化平台调用的便捷性与高可靠性要求，本 SDK 的 9 点标定模块采用**极简无状态架构**：
+
+```mermaid
+graph TD
+    subgraph 离线标定阶段 (标定片微标采集)
+        A1[运动台按 0->1->...->8 走位采集 9 张图片] --> A2[调用 Wafer_CalibrateAxisPixelGrid 一键解算]
+        A2 --> A3[自动输出标准 JSON 配方文件与综合诊断大图]
+    end
+
+    subgraph 在线生产阶段 (无句柄高速对位，耗时 < 50us)
+        B1[视觉识别像面像素坐标 u, v] --> B2[调用 Wafer_TransformPixelToAxis 传入配方路径与 u, v]
+        B2 --> B3[SDK 内部透明内存缓存: 首次按需载入 / 文件更新自动热重载]
+        B3 --> B4[极速仿射矩阵计算，输出物理绝对轴坐标 X, Y]
+        B5[已知 CAD 物理轴坐标 X, Y] --> B6[调用 Wafer_TransformAxisToPixel 传入配方路径与 X, Y]
+        B6 --> B7[极速仿射逆矩阵计算，输出像面像素坐标 u, v]
+    end
+```
+
+#### 极简化设计核心优势：
+1. **零句柄生命周期维护**：完全去除 `WaferAxisPixelCalibHandle` 及其创建（`Load`）与释放（`Destroy`），彻底规避由 C# 垃圾回收（GC）延迟或忘记调用释放导致的非托管内存泄漏；
+2. **零复杂配置结构体交互**：C# 侧无需定义任何复杂的配置或结果映射结构体，标定主接口直接以 `double initial_axis_x`, `double initial_axis_y`, `double step_size_mm` 等基础类型平铺传参；
+3. **线程安全的高性能透明内存缓存**：
+   - 坐标变换接口只接收标定配方文件路径 `calib_json_path`；
+   - 底层内部使用全局线程安全的 `std::unordered_map` 缓存仿射正逆系数；
+   - 自动检测配方文件的磁盘最后修改时间戳（`last_write_time`）。当配方未被修改时，直接在内存完成仿射乘加（单次耗时微秒级，无磁盘 I/O）；当机台重新标定并覆写 JSON 文件时，缓存无感自动热更新。
+
+---
+
+### 9.3 核心接口说明 (极简 3 接口参数详解)
+
+#### 1. Wafer_CalibrateAxisPixelGrid (9点网格标定主接口)
+```c
+int Wafer_CalibrateAxisPixelGrid(
+    const unsigned char** mono8_buffers, // 9 张连续内存 Mono8 图像指针数组 (顺序: Mark_0 ~ Mark_8)
+    int image_count,                     // 图像数量，固定为 9
+    int width,                           // 图像宽度 (如 4096)
+    int height,                          // 图像高度 (如 4096)
+    double initial_axis_x,               // Mark_0 处机械轴绝对 X 坐标 (mm，如 0.02905)
+    double initial_axis_y,               // Mark_0 处机械轴绝对 Y 坐标 (mm，如 83.58272)
+    double step_size_mm,                 // 单步移动步长 (mm，如 1.65)
+    const char* output_calib_json_path,  // 输出标定配方 JSON 文件路径 (传 NULL 则不写盘)
+    double* out_pixel_scale_x_um,        // 输出 X 方向像元物理尺寸当量 (um/px，传 NULL 表示不获取)
+    double* out_pixel_scale_y_um,        // 输出 Y 方向像元物理尺寸当量 (um/px，传 NULL 表示不获取)
+    unsigned char* diagnostic_bgr,       // 输出综合诊断图缓冲区 (3000x2400x3 字节，传 NULL 表示不生成)
+    int diag_width,                      // 诊断图宽度 (如 3000)
+    int diag_height                      // 诊断图高度 (如 2400)
+);
+```
+- **功能**：输入 9 张 Mono8 图像及初始参数，自动识别小圆亚像素中心，推导并拟合仿射变换矩阵，直接输出 X 与 Y 方向的像元物理尺寸当量，保存标定 JSON 配方并渲染综合诊断大图。
+- **返回值**：`WAFER_SUCCESS (0)` 或对应错误码。
+
+#### 2. Wafer_TransformPixelToAxis (在线生产高速坐标正变换)
+```c
+int Wafer_TransformPixelToAxis(
+    const char* calib_json_path, // 标定配方 JSON 文件路径
+    double u,                    // 像面像素坐标 U
+    double v,                    // 像面像素坐标 V
+    double* out_axis_x,          // 输出物理轴 X 坐标 (mm)
+    double* out_axis_y           // 输出物理轴 Y 坐标 (mm)
+);
+```
+- **功能**：根据指定的标定配方，将像面像素坐标快速换算为物理轴绝对坐标（视觉引导运动台精准移动对位）。
+- **性能**：内部透明缓存，调用耗时 $< 50\ \mu\text{s}$。
+
+#### 3. Wafer_TransformAxisToPixel (在线生产高速坐标逆变换)
+```c
+int Wafer_TransformAxisToPixel(
+    const char* calib_json_path, // 标定配方 JSON 文件路径
+    double axis_x,               // 物理轴 X 坐标 (mm)
+    double axis_y,               // 物理轴 Y 坐标 (mm)
+    double* out_u,               // 输出像面像素坐标 U
+    double* out_v                // 输出像面像素坐标 V
+);
+```
+- **功能**：根据指定的标定配方，将已知物理 CAD 坐标反算预测到相机视场像素坐标。
+- **性能**：内部透明缓存，调用耗时 $< 50\ \mu\text{s}$。
+
+---
+
+### 9.4 C# 调用代码示例 (纯内存流与在线对位)
+
+```csharp
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using WaferVisionSystem.Interop;
+
+public class AxisPixelCalibrationService {
+    /// <summary>
+    /// 离线阶段：通过 9 张相机图像内存流执行 9 点标定，并一键保存配方与诊断大图
+    /// </summary>
+    public static void CalibrateAndSaveRecipe(IntPtr[] mono8Buffers, int width, int height, string recipeJsonPath, string diagBmpPath) {
+        double initialAxisX = 0.02905;
+        double initialAxisY = 83.58272;
+        double stepSizeMm = 1.65;
+
+        int diagW = 3000;
+        int diagH = 2400;
+        int diagSize = diagW * diagH * 3;
+        IntPtr diagPtr = Marshal.AllocHGlobal(diagSize);
+
+        double pixelScaleXUm = 0.0;
+        double pixelScaleYUm = 0.0;
+
+        try {
+            // 一键调用 9 点标定主接口 (直接返回 X/Y 像素物理当量)
+            int ret = WaferCalibNative.Wafer_CalibrateAxisPixelGrid(
+                mono8Buffers, 9, width, height,
+                initialAxisX, initialAxisY, stepSizeMm,
+                recipeJsonPath,
+                out pixelScaleXUm, out pixelScaleYUm,
+                diagPtr, diagW, diagH
+            );
+
+            if (ret != WaferCalibNative.WAFER_SUCCESS) {
+                throw new Exception($"9点标定计算失败，错误码: {ret}");
+            }
+
+            Console.WriteLine($"9点标定成功，已自动保存配方至: {recipeJsonPath}");
+            Console.WriteLine($"  直接输出像元物理当量: X = {pixelScaleXUm:F4} um/px, Y = {pixelScaleYUm:F4} um/px");
+
+            // 保存高分辨率综合诊断大图
+            using (var bmp = new Bitmap(diagW, diagH, diagW * 3, PixelFormat.Format24bppRgb, diagPtr)) {
+                bmp.Save(diagBmpPath, ImageFormat.Png);
+            }
+        } finally {
+            Marshal.FreeHGlobal(diagPtr);
+        }
+    }
+
+    /// <summary>
+    /// 在线生产阶段：直接传配方路径执行超高速坐标转换（无句柄维护，透明高速缓存）
+    /// </summary>
+    public static void ProductionAlignmentDemo(string recipeJsonPath) {
+        // 假设相机在像面 (2500.0, 1800.0) 处检测到晶圆目标特征点
+        double targetPixelU = 2500.0;
+        double targetPixelV = 1800.0;
+
+        // 1. 像面像素坐标 -> 机械轴物理绝对坐标 (引导对位)
+        double axisX = 0.0, axisY = 0.0;
+        int ret = WaferCalibNative.Wafer_TransformPixelToAxis(
+            recipeJsonPath, targetPixelU, targetPixelV, out axisX, out axisY
+        );
+        if (ret != WaferCalibNative.WAFER_SUCCESS) {
+            throw new Exception($"像素转物理轴坐标失败，错误码: {ret}");
+        }
+        Console.WriteLine($"视觉引导对位目标轴坐标: X = {axisX:F5} mm, Y = {axisY:F5} mm");
+
+        // 2. 机械轴物理绝对坐标 -> 像面像素坐标 (反投视场)
+        double reprojectU = 0.0, reprojectV = 0.0;
+        ret = WaferCalibNative.Wafer_TransformAxisToPixel(
+            recipeJsonPath, axisX, axisY, out reprojectU, out reprojectV
+        );
+        if (ret != WaferCalibNative.WAFER_SUCCESS) {
+            throw new Exception($"物理轴转像素坐标失败，错误码: {ret}");
+        }
+        Console.WriteLine($"反向投影像素坐标: U = {reprojectU:F2}, V = {reprojectV:F2}");
+    }
+}
+```
+
+---
+
+### 9.5 实测标定与综合诊断大图展示
+
+使用标定片实测 9 张图像（4096×4096 Mono8，起始轴 $(0.02905, 83.58272)$，步长 $1.65\text{ mm}$）输出的 $3000 \times 2400$ 工业级综合诊断看板如下：
+
+| 晶圆检测平台 9 点手眼/轴-像素标定综合工业诊断大图 |
+|:---:|
+| ![9点标定综合诊断大图](images/axis_pixel_calibration_diagnostic.png) |
+| *看板图解：<br>1. **左侧 3×3 视场特写与走位轨迹图**：9 宫格完整呈现 9 个点位微标的局部放大，绿色绘制高精度亚像素检测圆与十字中心，黄色粗箭头直观还原从中心 Mark_0 出发逆时针环绕外周单步步进的 $0 \to 1 \to 2 \to \dots \to 8$ 拓扑闭环轨迹；<br>2. **右上重投影残差矢量图 (放大 500x)**：灰色十字表示标称理想网格位置，绿色小圆表示由实际像素反算得到的绝对物理位置，红色矢量箭头将误差放大 500 倍呈现，清晰呈现两轴各向同性极优；<br>3. **右下精密参数与残差明细面板**：详细列出像元分辨率 $s_x = 0.9004\ \mu\text{m/px}, s_y = 0.9009\ \mu\text{m/px}$、长宽比 $0.9994$、安装旋转倾角 $-0.0929^\circ$，以及**全局 RMS 残差仅 $0.670\ \mu\text{m}$ ($0.74\text{ px}$)**、最大单点误差仅 $1.047\ \mu\text{m}$ 的计量级精度。* |
+
+---
+
 ## 附录：C++ 原生模块架构参考
 
 针对使用 C++ 直接集成的场景，SDK 内部核心算法均采用面向对象的纯 C++ 设计，头文件位于 `include/wafer_calib/` 目录下：
@@ -1354,5 +1764,6 @@ public class ReflectanceLutService {
 | **圆中心与图像中心差值** | `circle_center_offset.hpp` | `WaferCircleCenterOffsetDetector` | `FindCenterOffset(...)` |
 | **平台旋转中心计算** | `rotation_center.hpp` | `WaferPlatformRotationCenterDetector` | `Calculate(...)` |
 | **反射率响应与线性化LUT** | `reflectance_lut.hpp` | `WaferReflectanceLutCalibrator` | `Calibrate(...)`<br>`ApplyLut(...)`<br>`SaveLut(...)`<br>`LoadLut(...)` |
+| **9点轴-像素标定与坐标转换** | `axis_pixel_calibration.hpp` | `AxisPixelCalibrationModule` | `calibrateGrid(...)`<br>`calibratePoints(...)`<br>`transformPixelToAxis(...)`<br>`transformAxisToPixel(...)`<br>`saveCalibrationJson(...)`<br>`loadCalibrationJson(...)` |
 
 在 C++ 工程中引入上述头文件并链接 `WaferCalibSDK.lib`，即可直接传入 `cv::Mat` 容器进行高速面向对象调用。

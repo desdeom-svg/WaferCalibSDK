@@ -1,21 +1,19 @@
-# 任务清单：反射率光电响应标定与灰度线性化 LUT 功能实现
+# 任务清单：双视野大基线水平标定线全局角度检测
 
-- [x] 算法方案与数据分析 <!-- id: 0 -->
-    - [x] 实测 4 张不同反射率图片（5%、50%、75%、90%）直方图与暗角渐晕分析 <!-- id: 1 -->
-    - [x] 验证手绘图中 7 段映射函数的数学逻辑与物理基准 (13, 128, 192, 230) <!-- id: 2 -->
-    - [x] 确认分段阶梯死区与平滑样条双模式算法架构 <!-- id: 3 -->
-- [x] 核心算法模块开发 <!-- id: 4 -->
-    - [x] 创建 include/wafer_calib/modules/reflectance_lut.hpp <!-- id: 5 -->
-    - [x] 实现 src/modules/reflectance_lut.cpp (ROI波峰提取 + 7段死区LUT生成 + PCHIP平滑样条LUT + 图像查表映射 + 诊断大图渲染) <!-- id: 6 -->
-- [x] C API 与导出层扩展 <!-- id: 7 -->
-    - [x] 在 include/wafer_calib/c_api/wafer_calib_c.h 中新增结构体与函数声明 <!-- id: 8 -->
-    - [x] 在 src/c_api/wafer_calib_c.cpp 中实现 C ABI 包装函数 <!-- id: 9 -->
-- [x] 编译与验证 <!-- id: 10 -->
-    - [x] 编写单元与集成测试 tests/test_reflectance_lut.cpp <!-- id: 11 -->
-    - [x] 更新 CMakeLists.txt 包含新增模块与测试工程 <!-- id: 12 -->
-    - [x] 编译 Release 版本并运行测试 (基准耗时 ~0.52ms, R^2=0.999998) <!-- id: 13 -->
-    - [x] 生成并输出高分辨率四合一工业诊断大图至原数据目录及文档目录 <!-- id: 14 -->
-- [x] 文档与交付物更新 <!-- id: 15 -->
-    - [x] 更新 docs/WaferCalibSDK_C_API调用说明.md 增加第八单元“反射率光电响应标定与灰度线性化 LUT 功能” <!-- id: 16 -->
-    - [x] 重新编译交付 DLL 至 docs/WaferCalibSDK.dll <!-- id: 17 -->
-    - [x] 重新导出最新 PDF 手册至 docs/WaferCalibSDK_C_API调用说明.pdf <!-- id: 18 -->
+- [x] 核心算法与数据结构扩展 (LineAngleModule) <!-- id: 0 -->
+    - [x] 在 `include/wafer_calib/modules/line_angle.hpp` 中声明 `findTwoViewHorizontalLineAngle` 及双视野结果结构体 <!-- id: 1 -->
+    - [x] 在 `src/modules/line_angle.cpp` 中抽取高精度单图直线亚像素参数提取器（获取斜率、中心切线高度 $v_c$） <!-- id: 2 -->
+    - [x] 实现跨两视野大基线全局角度解算数学模型（基于 $\Delta X_{\text{stage}}$ 与 $\Delta v \times s_y$） <!-- id: 3 -->
+    - [x] 实现 `3000 × 1800` 工业看板综合对齐诊断大图合成（左微观特写、右微观特写、中轴落差标尺、顶部 HUD、底部参数清单） <!-- id: 4 -->
+- [x] C API 极简平铺接口导出与封装 <!-- id: 5 -->
+    - [x] 在 `include/wafer_calib/c_api/wafer_calib_c.h` 中导出 `Wafer_FindTwoViewHorizontalLineAngle`（去掉 `stage_delta_y_mm`，支持 BGR 缓冲区或 NULL） <!-- id: 6 -->
+    - [x] 在 `src/c_api/wafer_calib_c.cpp` 中实现严密参数校验与 C++ 异常防护 <!-- id: 7 -->
+- [x] 自动化测试与实测数据验证 <!-- id: 8 -->
+    - [x] 新建 `tests/test_two_view_line_angle.cpp`，加载 `images/根据线输出角度/角度调整1.bmp` 与 `角度调整2.bmp` <!-- id: 9 -->
+    - [x] 验证位移大基线解算角度、角分转换、局部单图角度对比与诊断大图输出落盘 <!-- id: 10 -->
+    - [x] 使用 MSBuild 执行编译与测试套件回归 <!-- id: 11 -->
+- [x] 交付物与技术文档更新 <!-- id: 12 -->
+    - [x] 编译 Release x64 DLL/LIB 并拷贝至 `docs/` <!-- id: 13 -->
+    - [x] 更新 `docs/WaferCalibSDK_C_API调用说明.md` 新增双视野角度检测章节与 C# P/Invoke 签名代码 <!-- id: 14 -->
+    - [x] 执行 `tools/convert_docs_to_pdf.py` 重新生成 `docs/WaferCalibSDK_C_API调用说明.pdf` <!-- id: 15 -->
+    - [x] 更新 `.ai_docs/walkthrough.md` 记录最终交付成果 <!-- id: 16 -->

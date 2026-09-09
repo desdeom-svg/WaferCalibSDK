@@ -129,6 +129,39 @@ WAFER_API int Wafer_FindHorizontalLineAngle(
 );
 
 /**
+ * @brief 跨双视野大基线高精度水平标定线全局角度检测。
+ * @note 适用于相机视野固定，机械轴仅在 X 方向移动大跨度距离分别拍摄左右两端视野的场景。
+ *       结合 X 轴移动物理跨距与像面亚像素垂直落差，将测角精度提高 1~2 个数量级。
+ * @param mono8_view1 视野 1 (最左端) Mono8 图像指针，长度 width * height 字节。
+ * @param mono8_view2 视野 2 (最右端) Mono8 图像指针，长度 width * height 字节。
+ * @param width 图像宽度，单位：像素 (如 4096)。
+ * @param height 图像高度，单位：像素 (如 4096)。
+ * @param stage_delta_x_mm 机械 X 轴从视野 1 到视野 2 移动的物理距离，单位：毫米 (mm，如 285.000)。
+ * @param pixel_scale_y_um 垂直 Y 方向像元当量，单位：微米/像素 (um/px，如 0.9009，可直接由 9点标定输出)。
+ * @param out_global_angle_deg 输出大基线超高精度全局角度，单位：度 (范围 [-90, 90))。
+ * @param out_view1_angle_deg 可选输出视野 1 单图局部拟合角度 (度)；传 NULL 则不获取。
+ * @param out_view2_angle_deg 可选输出视野 2 单图局部拟合角度 (度)；传 NULL 则不获取。
+ * @param diagnostic_bgr 可选输出双视野联合对齐诊断拼接大图缓冲区 (3通道 BGR，大小为 diag_width * diag_height * 3 字节；传 NULL 表示不生成)。
+ * @param diag_width 诊断大图宽度 (推荐 3000)。
+ * @param diag_height 诊断大图高度 (推荐 1800)。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_FindTwoViewHorizontalLineAngle(
+    const unsigned char* mono8_view1,
+    const unsigned char* mono8_view2,
+    int width,
+    int height,
+    double stage_delta_x_mm,
+    double pixel_scale_y_um,
+    double* out_global_angle_deg,
+    double* out_view1_angle_deg,
+    double* out_view2_angle_deg,
+    unsigned char* diagnostic_bgr,
+    int diag_width,
+    int diag_height
+);
+
+/**
  * @brief 从一张规则圆点阵 Mono8 图建立固定视野畸变校正模板。
  * @param calibration_image_buffer 输入标定点阵 Mono8 图像，长度为 width * height 字节。
  * @param width 标定图宽度，单位：像素。
@@ -428,6 +461,81 @@ WAFER_API int Wafer_SaveLutToFile(
 WAFER_API int Wafer_LoadLutFromFile(
     const char* file_path,
     unsigned char* lut_256
+);
+
+/* ========================================================================= */
+/* 9. 9点标定（手眼/轴-像素标定，AxisPixelCalibration）与在线坐标转换        */
+/* ========================================================================= */
+
+/**
+ * @brief 基于 9 张网格图像与初始步长配置执行 9 点手眼/轴-像素标定。
+ * @note 内部根据 Mark_0 ~ Mark_8 顺时针/逆时针步进轨迹自动解算 2x3 仿射变换矩阵，
+ *       评估亚像素残差，并可持久化输出配方 JSON 文件与综合高分辨率诊断大图。
+ * @param mono8_buffers 9 张连续内存 Mono8 图像指针数组 (顺序必须为: Mark_0 ~ Mark_8)。
+ * @param image_count 图像数量，固定为 9。
+ * @param width 图像宽度，单位：像素 (如 4096)。
+ * @param height 图像高度，单位：像素 (如 4096)。
+ * @param initial_axis_x Mark_0 (中心基准点) 处机械轴绝对 X 坐标，单位：毫米 (mm，如 0.02905)。
+ * @param initial_axis_y Mark_0 (中心基准点) 处机械轴绝对 Y 坐标，单位：毫米 (mm，如 83.58272)。
+ * @param step_size_mm 单步移动步长，单位：毫米 (mm，如 1.65)。
+ * @param output_calib_json_path 输出标定配方 JSON 文件路径 (传 NULL 或空字符串则不写盘)。
+ * @param out_pixel_scale_x_um 可选输出 X 方向像元物理尺寸当量，单位：微米/像素 (um/px)；传 NULL 表示不获取。
+ * @param out_pixel_scale_y_um 可选输出 Y 方向像元物理尺寸当量，单位：微米/像素 (um/px)；传 NULL 表示不获取。
+ * @param diagnostic_bgr 可选输出综合诊断大图缓冲区 (3通道 BGR，大小为 diag_width * diag_height * 3 字节；传 NULL 表示不生成)。
+ * @param diag_width 诊断图宽度 (如 3000)。
+ * @param diag_height 诊断图高度 (如 2400)。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CalibrateAxisPixelGrid(
+    const unsigned char** mono8_buffers,
+    int image_count,
+    int width,
+    int height,
+    double initial_axis_x,
+    double initial_axis_y,
+    double step_size_mm,
+    const char* output_calib_json_path,
+    double* out_pixel_scale_x_um,
+    double* out_pixel_scale_y_um,
+    unsigned char* diagnostic_bgr,
+    int diag_width,
+    int diag_height
+);
+
+/**
+ * @brief 在线生产高速坐标正变换 (像素坐标 -> 机械轴物理绝对坐标)。
+ * @note 内部集成线程安全的基于文件修改时间戳的透明内存模型缓存，避免重复读盘，单次转换达纳秒级。
+ * @param calib_json_path 标定配方 JSON 文件路径。
+ * @param u 像面像素坐标 U。
+ * @param v 像面像素坐标 V。
+ * @param out_axis_x 输出物理轴 X 坐标，单位：毫米 (mm)。
+ * @param out_axis_y 输出物理轴 Y 坐标，单位：毫米 (mm)。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_TransformPixelToAxis(
+    const char* calib_json_path,
+    double u,
+    double v,
+    double* out_axis_x,
+    double* out_axis_y
+);
+
+/**
+ * @brief 在线生产高速坐标逆变换 (机械轴物理绝对坐标 -> 像素坐标)。
+ * @note 内部集成线程安全的基于文件修改时间戳的透明内存模型缓存，避免重复读盘，单次转换达纳秒级。
+ * @param calib_json_path 标定配方 JSON 文件路径。
+ * @param axis_x 物理轴 X 坐标，单位：毫米 (mm)。
+ * @param axis_y 物理轴 Y 坐标，单位：毫米 (mm)。
+ * @param out_u 输出像面像素坐标 U。
+ * @param out_v 输出像面像素坐标 V。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_TransformAxisToPixel(
+    const char* calib_json_path,
+    double axis_x,
+    double axis_y,
+    double* out_u,
+    double* out_v
 );
 
 #ifdef __cplusplus

@@ -1,6 +1,11 @@
 #include "wafer_calib/c_api/wafer_calib_c.h"
 #include "wafer_calib/wafer_calib.hpp"
 #include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 static int statusToCErrorCode(const wafer_calib::Status& status) {
@@ -71,6 +76,60 @@ WAFER_API int Wafer_FindHorizontalLineAngle(
     const wafer_calib::Status status = wafer_calib::LineAngleModule::findHorizontalLineAngle(
         input, *angle_degrees, output);
     return statusToCErrorCode(status);
+}
+
+WAFER_API int Wafer_FindTwoViewHorizontalLineAngle(
+    const unsigned char* mono8_view1,
+    const unsigned char* mono8_view2,
+    int width,
+    int height,
+    double stage_delta_x_mm,
+    double pixel_scale_y_um,
+    double* out_global_angle_deg,
+    double* out_view1_angle_deg,
+    double* out_view2_angle_deg,
+    unsigned char* diagnostic_bgr,
+    int diag_width,
+    int diag_height
+) {
+    if (!mono8_view1 || !mono8_view2 || width <= 0 || height <= 0 ||
+        std::abs(stage_delta_x_mm) < 1e-4 || pixel_scale_y_um <= 1e-4 || !out_global_angle_deg) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    try {
+        cv::Mat view1(height, width, CV_8UC1, const_cast<unsigned char*>(mono8_view1));
+        cv::Mat view2(height, width, CV_8UC1, const_cast<unsigned char*>(mono8_view2));
+
+        wafer_calib::TwoViewLineAngleResult result;
+        cv::Mat diag_mat;
+
+        const int dw = (diagnostic_bgr && diag_width > 0 && diag_height > 0) ? diag_width : 0;
+        const int dh = (diagnostic_bgr && diag_width > 0 && diag_height > 0) ? diag_height : 0;
+
+        const wafer_calib::Status status = wafer_calib::LineAngleModule::findTwoViewHorizontalLineAngle(
+            view1, view2, stage_delta_x_mm, pixel_scale_y_um, result, diag_mat, dw, dh);
+
+        if (!status.ok()) {
+            return statusToCErrorCode(status);
+        }
+
+        *out_global_angle_deg = result.global_angle_deg;
+        if (out_view1_angle_deg) {
+            *out_view1_angle_deg = result.view1_angle_deg;
+        }
+        if (out_view2_angle_deg) {
+            *out_view2_angle_deg = result.view2_angle_deg;
+        }
+
+        if (diagnostic_bgr && !diag_mat.empty()) {
+            std::memcpy(diagnostic_bgr, diag_mat.data, static_cast<size_t>(diag_mat.cols) * diag_mat.rows * 3);
+        }
+
+        return WAFER_SUCCESS;
+    } catch (const std::exception&) {
+        return WAFER_ERR_UNKNOWN;
+    }
 }
 
 WAFER_API int Wafer_CreateDotGridDistortionTemplate(
@@ -689,6 +748,246 @@ int Wafer_LoadLutFromFile(
     if (!wafer_calib::WaferReflectanceLutCalibrator::LoadLut(file_path, lut_256)) {
         return WAFER_ERR_FILE_IO;
     }
+    return WAFER_SUCCESS;
+}
+
+/* ========================================================================= */
+/* 9. 9点标定与在线坐标转换 C API 实现                                      */
+/* ========================================================================= */
+
+struct AxisPixelModelCacheEntry {
+    std::filesystem::file_time_type last_write_time{};
+    double m_pix2axis[6]{};
+    double m_axis2pix[6]{};
+    bool valid = false;
+};
+
+static std::mutex g_axis_pixel_cache_mutex;
+static std::unordered_map<std::wstring, AxisPixelModelCacheEntry> g_axis_pixel_cache;
+
+static int getOrLoadAxisPixelModel(
+    const char* calib_json_path,
+    AxisPixelModelCacheEntry& out_entry
+) {
+    if (!calib_json_path || calib_json_path[0] == '\0') {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    std::error_code ec;
+    std::filesystem::path p(wafer_calib::stringToWstring(calib_json_path));
+    if (!std::filesystem::exists(p, ec)) {
+        return WAFER_ERR_FILE_IO;
+    }
+
+    auto curr_write_time = std::filesystem::last_write_time(p, ec);
+    if (ec) {
+        return WAFER_ERR_FILE_IO;
+    }
+
+    std::wstring path_key;
+    auto can_p = std::filesystem::weakly_canonical(p, ec);
+    if (!ec) {
+        path_key = can_p.wstring();
+    } else {
+        path_key = p.wstring();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_axis_pixel_cache_mutex);
+        auto it = g_axis_pixel_cache.find(path_key);
+        if (it != g_axis_pixel_cache.end() && it->second.valid && it->second.last_write_time == curr_write_time) {
+            out_entry = it->second;
+            return WAFER_SUCCESS;
+        }
+    }
+
+    wafer_calib::AxisPixelCalibResult loaded_res;
+    wafer_calib::Status st = wafer_calib::AxisPixelCalibrationModule::loadCalibrationJson(calib_json_path, loaded_res);
+    if (!st.ok()) {
+        return statusToCErrorCode(st);
+    }
+
+    if (loaded_res.m_pix2axis.empty() || loaded_res.m_pix2axis.rows != 2 || loaded_res.m_pix2axis.cols != 3 ||
+        loaded_res.m_axis2pix.empty() || loaded_res.m_axis2pix.rows != 2 || loaded_res.m_axis2pix.cols != 3) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    AxisPixelModelCacheEntry new_entry;
+    new_entry.last_write_time = curr_write_time;
+    new_entry.valid = true;
+
+    new_entry.m_pix2axis[0] = loaded_res.m_pix2axis.at<double>(0, 0);
+    new_entry.m_pix2axis[1] = loaded_res.m_pix2axis.at<double>(0, 1);
+    new_entry.m_pix2axis[2] = loaded_res.m_pix2axis.at<double>(0, 2);
+    new_entry.m_pix2axis[3] = loaded_res.m_pix2axis.at<double>(1, 0);
+    new_entry.m_pix2axis[4] = loaded_res.m_pix2axis.at<double>(1, 1);
+    new_entry.m_pix2axis[5] = loaded_res.m_pix2axis.at<double>(1, 2);
+
+    new_entry.m_axis2pix[0] = loaded_res.m_axis2pix.at<double>(0, 0);
+    new_entry.m_axis2pix[1] = loaded_res.m_axis2pix.at<double>(0, 1);
+    new_entry.m_axis2pix[2] = loaded_res.m_axis2pix.at<double>(0, 2);
+    new_entry.m_axis2pix[3] = loaded_res.m_axis2pix.at<double>(1, 0);
+    new_entry.m_axis2pix[4] = loaded_res.m_axis2pix.at<double>(1, 1);
+    new_entry.m_axis2pix[5] = loaded_res.m_axis2pix.at<double>(1, 2);
+
+    {
+        std::lock_guard<std::mutex> lock(g_axis_pixel_cache_mutex);
+        g_axis_pixel_cache[path_key] = new_entry;
+    }
+
+    out_entry = new_entry;
+    return WAFER_SUCCESS;
+}
+
+int Wafer_CalibrateAxisPixelGrid(
+    const unsigned char** mono8_buffers,
+    int image_count,
+    int width,
+    int height,
+    double initial_axis_x,
+    double initial_axis_y,
+    double step_size_mm,
+    const char* output_calib_json_path,
+    double* out_pixel_scale_x_um,
+    double* out_pixel_scale_y_um,
+    unsigned char* diagnostic_bgr,
+    int diag_width,
+    int diag_height
+) {
+    if (!mono8_buffers || image_count != 9 || width <= 0 || height <= 0 || std::abs(step_size_mm) < 1e-9) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    std::vector<cv::Mat> images;
+    images.reserve(9);
+    for (int i = 0; i < 9; ++i) {
+        if (!mono8_buffers[i]) {
+            return WAFER_ERR_IMAGE_EMPTY;
+        }
+        images.push_back(cv::Mat(height, width, CV_8UC1, const_cast<unsigned char*>(mono8_buffers[i])));
+    }
+
+    wafer_calib::AxisPixelGridConfig cpp_cfg;
+    cpp_cfg.initial_axis_x = initial_axis_x;
+    cpp_cfg.initial_axis_y = initial_axis_y;
+    cpp_cfg.step_size_mm = step_size_mm;
+    cpp_cfg.axis_direction_x = 1;
+    cpp_cfg.axis_direction_y = 1;
+    cpp_cfg.objective_id = "";
+
+    wafer_calib::AxisPixelCalibResult cpp_res;
+    cv::Mat diag;
+    const int dw = (diag_width > 0) ? diag_width : 3000;
+    const int dh = (diag_height > 0) ? diag_height : 2400;
+
+    wafer_calib::Status st = wafer_calib::AxisPixelCalibrationModule::calibrateGrid(
+        images, cpp_cfg, cpp_res, diag, dw, dh
+    );
+    if (!st.ok()) {
+        return statusToCErrorCode(st);
+    }
+
+    if (out_pixel_scale_x_um) {
+        *out_pixel_scale_x_um = cpp_res.pixel_scale_x_um;
+    }
+    if (out_pixel_scale_y_um) {
+        *out_pixel_scale_y_um = cpp_res.pixel_scale_y_um;
+    }
+
+    if (output_calib_json_path && output_calib_json_path[0] != '\0') {
+        st = wafer_calib::AxisPixelCalibrationModule::saveCalibrationJson(output_calib_json_path, cpp_res);
+        if (!st.ok()) {
+            return statusToCErrorCode(st);
+        }
+
+        std::error_code ec;
+        std::filesystem::path p(wafer_calib::stringToWstring(output_calib_json_path));
+        auto curr_write_time = std::filesystem::last_write_time(p, ec);
+        if (!ec) {
+            std::wstring path_key;
+            auto can_p = std::filesystem::weakly_canonical(p, ec);
+            if (!ec) {
+                path_key = can_p.wstring();
+            } else {
+                path_key = p.wstring();
+            }
+
+            AxisPixelModelCacheEntry entry;
+            entry.last_write_time = curr_write_time;
+            entry.valid = true;
+            entry.m_pix2axis[0] = cpp_res.m_pix2axis.at<double>(0, 0);
+            entry.m_pix2axis[1] = cpp_res.m_pix2axis.at<double>(0, 1);
+            entry.m_pix2axis[2] = cpp_res.m_pix2axis.at<double>(0, 2);
+            entry.m_pix2axis[3] = cpp_res.m_pix2axis.at<double>(1, 0);
+            entry.m_pix2axis[4] = cpp_res.m_pix2axis.at<double>(1, 1);
+            entry.m_pix2axis[5] = cpp_res.m_pix2axis.at<double>(1, 2);
+
+            entry.m_axis2pix[0] = cpp_res.m_axis2pix.at<double>(0, 0);
+            entry.m_axis2pix[1] = cpp_res.m_axis2pix.at<double>(0, 1);
+            entry.m_axis2pix[2] = cpp_res.m_axis2pix.at<double>(0, 2);
+            entry.m_axis2pix[3] = cpp_res.m_axis2pix.at<double>(1, 0);
+            entry.m_axis2pix[4] = cpp_res.m_axis2pix.at<double>(1, 1);
+            entry.m_axis2pix[5] = cpp_res.m_axis2pix.at<double>(1, 2);
+
+            std::lock_guard<std::mutex> lock(g_axis_pixel_cache_mutex);
+            g_axis_pixel_cache[path_key] = entry;
+        }
+    }
+
+    if (diagnostic_bgr && !diag.empty()) {
+        if (diag.cols == dw && diag.rows == dh) {
+            std::memcpy(diagnostic_bgr, diag.data, dw * dh * 3);
+        } else {
+            cv::Mat resized;
+            cv::resize(diag, resized, cv::Size(dw, dh));
+            std::memcpy(diagnostic_bgr, resized.data, dw * dh * 3);
+        }
+    }
+
+    return WAFER_SUCCESS;
+}
+
+int Wafer_TransformPixelToAxis(
+    const char* calib_json_path,
+    double u,
+    double v,
+    double* out_axis_x,
+    double* out_axis_y
+) {
+    if (!calib_json_path || !out_axis_x || !out_axis_y) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    AxisPixelModelCacheEntry entry;
+    int err = getOrLoadAxisPixelModel(calib_json_path, entry);
+    if (err != WAFER_SUCCESS) {
+        return err;
+    }
+
+    *out_axis_x = entry.m_pix2axis[0] * u + entry.m_pix2axis[1] * v + entry.m_pix2axis[2];
+    *out_axis_y = entry.m_pix2axis[3] * u + entry.m_pix2axis[4] * v + entry.m_pix2axis[5];
+    return WAFER_SUCCESS;
+}
+
+int Wafer_TransformAxisToPixel(
+    const char* calib_json_path,
+    double axis_x,
+    double axis_y,
+    double* out_u,
+    double* out_v
+) {
+    if (!calib_json_path || !out_u || !out_v) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    AxisPixelModelCacheEntry entry;
+    int err = getOrLoadAxisPixelModel(calib_json_path, entry);
+    if (err != WAFER_SUCCESS) {
+        return err;
+    }
+
+    *out_u = entry.m_axis2pix[0] * axis_x + entry.m_axis2pix[1] * axis_y + entry.m_axis2pix[2];
+    *out_v = entry.m_axis2pix[3] * axis_x + entry.m_axis2pix[4] * axis_y + entry.m_axis2pix[5];
     return WAFER_SUCCESS;
 }
 

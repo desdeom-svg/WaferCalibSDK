@@ -76,3 +76,10 @@ target_link_libraries(test_platform_rotation_center PRIVATE WaferCalibSDK ${Open
 
 add_executable(test_reflectance_lut tests/test_reflectance_lut.cpp)
 target_link_libraries(test_reflectance_lut PRIVATE WaferCalibSDK ${OpenCV_LIBS})
+
+add_executable(test_axis_pixel_calibration tests/test_axis_pixel_calibration.cpp)
+target_link_libraries(test_axis_pixel_calibration PRIVATE WaferCalibSDK ${OpenCV_LIBS})
+
+add_executable(test_two_view_line_angle tests/test_two_view_line_angle.cpp)
+target_link_libraries(test_two_view_line_angle PRIVATE WaferCalibSDK ${OpenCV_LIBS})
+
