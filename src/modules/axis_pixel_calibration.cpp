@@ -127,39 +127,100 @@ Status AxisPixelCalibrationModule::detectMarkerDot(
         return Status::Error(ErrorCode::ImageFormatMismatch, "输入图像为空或非 Mono8 格式");
     }
 
-    // 1. 动态阈值二值化与轮廓初筛
-    cv::Mat thresh;
-    cv::threshold(mono8, thresh, 70.0, 255.0, cv::THRESH_BINARY);
+    // 1. 多尺度高斯差分 (DoG) 去除全局不均匀背景并自适应提取微标小圆
+    cv::Mat g_small;
+    cv::Mat g_large;
+    cv::GaussianBlur(mono8, g_small, cv::Size(9, 9), 2.0);
+    cv::GaussianBlur(mono8, g_large, cv::Size(65, 65), 15.0);
 
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::Mat diff_pos;
+    cv::Mat diff_neg;
+    cv::subtract(g_small, g_large, diff_pos);
+    cv::subtract(g_large, g_small, diff_neg);
+
+    const double total_pixels = static_cast<double>(mono8.cols * mono8.rows);
+    const cv::Mat morph_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
 
     cv::Point2d rough_center;
     bool found_cand = false;
-    double best_diff = 1e9;
+    double best_score = -1e9;
 
-    for (const auto& c : contours) {
-        const double area = cv::contourArea(c);
-        if (area < 800.0 || area > 3500.0) {
+    const cv::Mat passes[2] = {diff_pos, diff_neg};
+    for (const auto& diff_img : passes) {
+        double min_val = 0.0;
+        double max_val = 0.0;
+        cv::minMaxLoc(diff_img, &min_val, &max_val);
+        if (max_val < 3.0) {
             continue;
         }
 
-        const cv::Rect bbox = cv::boundingRect(c);
-        const double aspect = static_cast<double>(bbox.width) / std::max(1, bbox.height);
-        if (aspect < 0.75 || aspect > 1.33) {
-            continue;
+        const int hist_size = 256;
+        float range[] = {0, 256};
+        const float* hist_range = {range};
+        cv::Mat hist;
+        cv::calcHist(&diff_img, 1, 0, cv::Mat(), hist, 1, &hist_size, &hist_range, true, false);
+
+        const double target_98 = total_pixels * 0.98;
+        const double target_995 = total_pixels * 0.995;
+        double accum = 0.0;
+        int th_98 = 0;
+        int th_995 = 0;
+        for (int i = 0; i < 256; ++i) {
+            accum += hist.at<float>(i);
+            if (accum >= target_98 && th_98 == 0) {
+                th_98 = i;
+            }
+            if (accum >= target_995 && th_995 == 0) {
+                th_995 = i;
+                break;
+            }
         }
 
-        const cv::Moments m = cv::moments(c);
-        if (m.m00 <= 0.0) {
-            continue;
+        int th_val = std::max(3, (th_98 + th_995) / 2);
+        if (th_val >= static_cast<int>(max_val)) {
+            th_val = std::max(3, static_cast<int>(max_val * 0.6));
         }
 
-        const double diff = std::abs(area - 1950.0);
-        if (diff < best_diff) {
-            best_diff = diff;
-            rough_center = cv::Point2d(m.m10 / m.m00, m.m01 / m.m00);
-            found_cand = true;
+        cv::Mat binary;
+        cv::threshold(diff_img, binary, th_val, 255, cv::THRESH_BINARY);
+        cv::Mat binary_clean;
+        cv::morphologyEx(binary, binary_clean, cv::MORPH_CLOSE, morph_kernel);
+        cv::morphologyEx(binary_clean, binary_clean, cv::MORPH_OPEN, morph_kernel);
+
+        std::vector<std::vector<cv::Point>> contours;
+        cv::findContours(binary_clean, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+        for (const auto& c : contours) {
+            const double area = cv::contourArea(c);
+            if (area < 500.0 || area > 10000.0) {
+                continue;
+            }
+
+            const double perimeter = cv::arcLength(c, true);
+            if (perimeter <= 0.0) {
+                continue;
+            }
+            const double circ = 4.0 * CV_PI * area / (perimeter * perimeter);
+            if (circ < 0.50) {
+                continue;
+            }
+
+            const cv::Moments m = cv::moments(c);
+            if (m.m00 <= 0.0) {
+                continue;
+            }
+
+            cv::Point2f encl_center;
+            float encl_r = 0.0f;
+            cv::minEnclosingCircle(c, encl_center, encl_r);
+
+            // 评分：综合圆度与目标微标小圆半径先验 (R ~ 25.5~27.0 px)
+            const double score = circ * 10.0 - std::abs(static_cast<double>(encl_r) - 26.5) * 0.5;
+            if (score > best_score) {
+                best_score = score;
+                rough_center = cv::Point2d(m.m10 / m.m00, m.m01 / m.m00);
+                found_cand = true;
+            }
         }
     }
 
