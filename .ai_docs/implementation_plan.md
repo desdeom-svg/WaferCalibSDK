@@ -1,104 +1,69 @@
-# 双视野大基线水平标定线全局角度检测功能实施计划
+# 在 WaferCalibTester 中新增 5 视野畸变标定与校正测试功能规划方案
 
-## 1. 用户需求确认与答复
-
-1. **确定只移动 X 轴、不移动 Y 轴**：
-   - **完全采纳**：在双视野大基线角度解算核心算法及 C API 接口中，正式**移除 `stage_delta_y_mm` 参数**。
-   - 接口入参简化为仅需 `stage_delta_x_mm`（机械 X 轴在两视野之间的位移物理距离，mm）与 `pixel_scale_y_um`（垂直方向像元当量，$\mu$m/px，可直接由 9 点标定接口输出获取）。
-
-2. **输出双视野联合对齐诊断拼接大图的分辨率**：
-   - **推荐工业标准看板分辨率：`3000 × 1800`**（或由入参 `diag_width, diag_height` 自定义）。
-   - **设计考量**：
-     - **轻量高效**：原图 2 张 4096×4096 若以 1:1 纯拼图（8192×4096），BGR 内存将超 100 MB，在工控软件 (C#/Qt) 界面渲染或写盘会有明显卡顿延迟；采用 `3000 × 1800` 占用内存仅约 16.2 MB，耗时极低（数十毫秒内生成），适配 2K/4K 显示屏。
-     - **信息高密度看板布局**：
-       - **顶部 HUD 状态栏 (高 150 px)**：大号醒目字体显示全局大基线直线角度 $\Theta_{\text{global}}$（包含“度”与“角分”）、状态及两端视野局部角度对比。
-       - **核心左右对比视口 (双通道，高约 1350 px)**：
-         - 左通道（宽约 1400 px）：展示【视野 1 (左端起点)】整图缩略图 + 直线亚像素边缘/拟合线局部特写子图，标注测量高度 $v_1$。
-         - 右通道（宽约 1400 px）：展示【视野 2 (右端终点)】整图缩略图 + 直线亚像素边缘/拟合线局部特写子图，标注测量高度 $v_2$。
-       - **中间对齐基准桥 (宽约 200 px)**：绘制跨越左右两视野的水平基准虚线与落差指示箭头，直观呈现像面落差 $\Delta v$ (px) 与物理落差 $\Delta Y$ (mm)。
-       - **底部度量参数清单 (高 300 px)**：详细列出机械移动距 $\Delta X_{\text{stage}}$、像元当量 $s_y$、像面落差、物理计算公式展开及一致性指标。
-     - **接口弹性控制**：支持传入 `diag_width, diag_height`，如传 `NULL, 0, 0` 则完全不生成图像，零内存占用、纳秒级跳过绘图。
+## 1. 背景与目标
+当前 `WaferCalibSDK` 底层已完整支持 **5 视野多点阵联合优化畸变标定**（`Wafer_CreateMultiViewDotGridDistortionTemplate` / `Wafer_CreateMultiViewDotGridTemplateFromFiles`），并生成 3×3 空间拓扑无损拼接的 BGR 综合诊断大图与单一全局多项式畸变配方。
+本任务旨在 C# WPF 测试上位机工程 [`D:\Projects\csharpProject\WaferCalibTester`](file:///D:/Projects/csharpProject/WaferCalibTester/) 中增加 **5 视野点阵畸变标定与实时校正** 的完整可视化测试界面与交互逻辑，与现有 4 个模块（十字 Mark 定位、水平线测角、单视野畸变、暗场去噪）保持统一的高品质 UI 风格。
 
 ---
 
-## 2. 数学机理与计算公式
+## 2. 用户审查与关键设计决策 (User Review Required)
 
-### 2.1 物理几何量与像面映射
-- 设视野 1 图像宽度为 $W$，高度为 $H$，在图像中心坚线 $u_c = W/2$ 处测得直线的亚像素中心高度为 $v_1$；
-- 设视野 2 图像在中心坚线 $u_c = W/2$ 处测得直线的亚像素中心高度为 $v_2$；
-- 机械 X 轴从视野 1 移动到视野 2 的位移量为 $\Delta X_{\text{stage}} > 0$（单位：mm），机台 Y 轴锁死不变 ($\Delta Y_{\text{stage}} = 0$)；
-- 像元 Y 方向物理当量为 $s_y = \text{pixel\_scale\_y\_um} / 1000.0$（单位：mm/px）。
+> [!IMPORTANT]
+> **5 视野输入拓扑顺序与内存规范**：
+> - 5 视野图像数组顺序严格固定为：**`[0: 中心 (Center), 1: 左上 (Top-Left), 2: 左下 (Bottom-Left), 3: 右上 (Top-Right), 4: 右下 (Bottom-Right)]`**；
+> - 5 视野联合标定输出的诊断大图为 **3×3 空间拓扑拼接大图**（输出分辨率为 $(W \times 3) \times (H \times 3)$，例如 $4096 \times 4096$ 原图对应 $12288 \times 12288$），SDK C ABI 要求调用方预先分配 $(W \times 3) \times (H \times 3) \times 3$ 字节的 BGR 缓冲区。
 
-### 2.2 全局基线角度公式
-直线上对应于两视野中心测点之间的像面垂直像素差为：
-$$\Delta v = v_2 - v_1 \quad (\text{像素})$$
-转换为工件/物理基准上的垂直几何高度差：
-$$\Delta Y_{\text{line\_world}} = -(v_2 - v_1) \times \left(\frac{\text{pixel\_scale\_y\_um}}{1000.0}\right) \quad (\text{mm})$$
-*(注：图像坐标系中 $v$ 轴向下为正；若 $v_2 > v_1$ 说明右侧直线在图像中向下偏移，物理上工件右侧向下倾斜，故取负号)*
-
-两测点在物理 X 方向的跨距为：
-$$\Delta X_{\text{line\_world}} = \Delta X_{\text{stage}} \quad (\text{mm})$$
-
-最终跨双视野大基线全局角度为：
-$$\Theta_{\text{global}} = \arctan\left(\frac{\Delta Y_{\text{line\_world}}}{\Delta X_{\text{stage}}}\right) \times \frac{180}{\pi} \quad (\text{度})$$
-角分表示：
-$$\Theta_{\text{arcmin}} = \Theta_{\text{global}} \times 60 \quad (\text{角分})$$
+> [!TIP]
+> **测试样本快捷载入支持**：
+> - 界面将提供 **“载入预设样本 (1.5X / 2.5X / 5X / 10X / 20X)”** 下拉选择与一键导入功能，自动载入 `D:\images\谷神星\标准化\标定片\` 下的对应 5 张视野图；
+> - 支持用户自定义浏览选择本地 5 张图像（支持单独指定 5 个槽位，或按文件夹一次性载入）。
 
 ---
 
-## 3. C API 接口设计
+## 3. 拟修改与新增的文件清单 (Proposed Changes)
 
-在 `include/wafer_calib/c_api/wafer_calib_c.h` 中导出极简平铺接口：
+### C# 原生互操作层 (Native Interop)
 
-```c
-/**
- * @brief 跨双视野大基线高精度水平标定线全局角度检测。
- * @note 适用于相机固定，机械轴仅在 X 方向移动大跨度距离分别拍摄两端视野的场景。
- *       结合 X 轴移动物理跨距与像面亚像素垂直落差，将测角精度提高 1~2 个数量级。
- * @param mono8_view1 视野 1 (最左端) Mono8 图像指针，长度 width * height 字节。
- * @param mono8_view2 视野 2 (最右端) Mono8 图像指针，长度 width * height 字节。
- * @param width 图像宽度，单位：像素 (如 4096)。
- * @param height 图像高度，单位：像素 (如 4096)。
- * @param stage_delta_x_mm 机械 X 轴从视野 1 到视野 2 移动的物理距离，单位：毫米 (mm，如 285.000)。
- * @param pixel_scale_y_um 垂直 Y 方向像元当量，单位：微米/像素 (um/px，如 0.9009)。
- * @param out_global_angle_deg 输出大基线超高精度全局角度，单位：度 (范围 [-90, 90))。
- * @param out_view1_angle_deg 可选输出视野 1 单图局部拟合角度 (度)；传 NULL 则不获取。
- * @param out_view2_angle_deg 可选输出视野 2 单图局部拟合角度 (度)；传 NULL 则不获取。
- * @param diagnostic_bgr 可选输出双视野联合对齐诊断拼接大图缓冲区 (3通道 BGR，大小 diag_width * diag_height * 3 字节；传 NULL 表示不生成)。
- * @param diag_width 诊断大图宽度 (推荐 3000)。
- * @param diag_height 诊断大图高度 (推荐 1800)。
- * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
- */
-WAFER_API int Wafer_FindTwoViewHorizontalLineAngle(
-    const unsigned char* mono8_view1,
-    const unsigned char* mono8_view2,
-    int width,
-    int height,
-    double stage_delta_x_mm,
-    double pixel_scale_y_um,
-    double* out_global_angle_deg,
-    double* out_view1_angle_deg,
-    double* out_view2_angle_deg,
-    unsigned char* diagnostic_bgr,
-    int diag_width,
-    int diag_height
-);
-```
+#### [MODIFY] [NativeMethods.cs](file:///D:/Projects/csharpProject/WaferCalibTester/Native/NativeMethods.cs)
+- 新增 `Wafer_CreateMultiViewDotGridDistortionTemplate`（内存缓冲区模式 P/Invoke 声明）；
+- 新增 `Wafer_CreateMultiViewDotGridTemplateFromFiles`（文件路径模式 P/Invoke 声明）；
+- 新增 `Wafer_SaveDistortionTemplateToFile` / `Wafer_LoadDistortionTemplateFromFile`。
 
 ---
 
-## 4. 实施步骤
+### WPF 视图与交互层 (UI & ViewModel)
 
-1. **核心算法扩展** (`include/wafer_calib/modules/line_angle.hpp` & `src/modules/line_angle.cpp`)：
-   - 提取单图水平直线亚像素方程和中心纵坐标 $v_c$ 的底层辅助方法；
-   - 实现 `findTwoViewHorizontalLineAngle`，处理双视野亚像素直线提取、大基线角度联立求解与 3000×1800 工业看板诊断图合成。
-2. **C API 导出与封装** (`include/wafer_calib/c_api/wafer_calib_c.h` & `src/c_api/wafer_calib_c.cpp`)：
-   - 导出 `Wafer_FindTwoViewHorizontalLineAngle` 接口，完成严密参数校验与异常保护。
-3. **单元与集成测试** (`tests/test_two_view_line_angle.cpp`)：
-   - 载入 `D:\Projects\opencvProject\WaferCalibSDK\images\根据线输出角度` 下的实测图“角度调整1.bmp”和“角度调整2.bmp”；
-   - 验证轴位移与解算精度，导出 3000×1800 诊断图并落盘校验。
-4. **工程构建与交付**：
-   - MSBuild 编译 Release x64 DLL/LIB，同步更新至 `docs/` 目录；
-   - 更新 `docs/WaferCalibSDK_C_API调用说明.md`，添加双视野直线角度检测章节与 C# P/Invoke 示例；
-   - 运行 Python 脚本生成最新 `docs/WaferCalibSDK_C_API调用说明.pdf`；
-   - 更新 `.ai_docs/walkthrough.md`。
+#### [MODIFY] [MainWindow.xaml](file:///D:/Projects/csharpProject/WaferCalibTester/MainWindow.xaml)
+- 在主界面的 `TabControl` 中新增第 5 个 TabItem：`5. 5视野多点阵联合畸变标定与校正`；
+- **左侧控制面板**：
+  - **倍率与点阵参数**：点阵网格列数 (Cols，默认 10)、行数 (Rows，默认 10)、圆物理间距 (Spacing mm，如 1.0/0.6/0.3)、位移步长 (Step mm，默认 0.0 自适应)；
+  - **预设样本快速选择**：下拉框支持 `1.5X`、`2.5X`、`5X`、`10X`、`20X` 一键加载；
+  - **5 视野文件列表槽位**：展示当前加载的 5 个视野路径与状态；
+  - **标定建模按钮**：“运行 5 视野联合标定”；
+  - **标定指标卡片**：显示总有效圆点数、全画幅 RMS 残差 (px)、标定耗时；
+  - **配方管理**：“导出模板 (.json)” 与 “导入已有模板 (.json)”；
+  - **校正应用区**：“加载待校正图”、“运行实时畸变校正”、“保存校正后图像”。
+- **右侧双视窗图像区域**：
+  - 上方窗口（`viewerMultiDiag`）：展示 **3×3 空间拓扑无损拼接 BGR 综合诊断大图**；同时提供下拉切换查看单个视野的原始图；
+  - 下方窗口（`viewerMultiCorrected`）：展示 **待校正原图 / 实时校正后的无畸变图像**。
+
+#### [MODIFY] [MainWindow.xaml.cs](file:///D:/Projects/csharpProject/WaferCalibTester/MainWindow.xaml.cs)
+- 维护 5 视野图像缓冲数据（`m_multiViewPaths[5]`、`m_multiViewBuffers[5]` 等）；
+- 实现 5 视野联合标定调用、3×3 BGR 诊断图解析渲染、模板导出与载入；
+- 实现对任意单帧 Mono8 图像的高速畸变校正并送入 `ZoomableImageViewer` 实时缩放渲染。
+
+---
+
+## 4. 验证与测试计划 (Verification Plan)
+
+### 自动化与手动测试
+1. **编译测试**：使用 `dotnet build` 编译 `WaferCalibTester.csproj`，确保 0 警告 0 错误；
+2. **预设 5 视野样本测试**：
+   - 在 UI 中选择 `1.5XImages` 预设样本，点击“运行 5 视野联合标定”；
+   - 验证是否成功解算出 RMS 残差 $< 0.15\text{ px}$；
+   - 验证上方视窗是否正确显示 3×3 拼接诊断看板大图；
+3. **配方导出与导入验证**：
+   - 导出为 `.json` 配方，再重新导入，验证多项式系数与元数据完整性；
+4. **实时图像校正测试**：
+   - 载入 `中心.bmp`，点击“运行畸变校正”，验证校正耗时（$< 5\text{ ms}$）并在下方视窗清晰展示校正前后的对比效果；
+   - 点击“保存校正后图像”，验证导出的图像文件完整。
