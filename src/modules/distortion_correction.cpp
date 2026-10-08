@@ -210,19 +210,60 @@ struct ExtractedViewGrid {
     std::vector<OrderedGridPoint> points;
 };
 
-bool extractMultiViewSingleGrid(
+bool determineImageInversion(const cv::Mat& mono8) {
+    if (mono8.empty()) {
+        return false;
+    }
+    cv::Mat downsampled_img;
+    cv::resize(mono8, downsampled_img, cv::Size(512, 512), 0, 0, cv::INTER_AREA);
+
+    int hist[256] = {0};
+    for (int r = 0; r < downsampled_img.rows; ++r) {
+        const uchar* p = downsampled_img.ptr<uchar>(r);
+        for (int c = 0; c < downsampled_img.cols; ++c) {
+            hist[p[c]]++;
+        }
+    }
+
+    int bg_mode = 0;
+    int max_freq = 0;
+    for (int g = 0; g < 256; ++g) {
+        if (hist[g] > max_freq) {
+            max_freq = hist[g];
+            bg_mode = g;
+        }
+    }
+
+    double bright_energy = 0.0;
+    int val = bg_mode + 15;
+    while (val < 256) {
+        bright_energy += static_cast<double>(hist[val]) * (val - bg_mode);
+        val++;
+    }
+
+    double dark_energy = 0.0;
+    int limit = (bg_mode > 15) ? (bg_mode - 15) : 0;
+    val = 0;
+    while (val < limit) {
+        dark_energy += static_cast<double>(hist[val]) * (bg_mode - val);
+        val++;
+    }
+
+    // 若暗端能量显著高于亮端，说明背景亮而圆点暗(白底黑圆，需要反相)；
+    // 否则说明背景暗而圆点亮(黑底白圆，无需反相)
+    return (dark_energy > bright_energy * 1.5);
+}
+
+bool extractCandidatesWithInversion(
     const cv::Mat& mono8,
+    bool invert,
     int grid_columns,
     int grid_rows,
-    double point_spacing_mm,
-    ExtractedViewGrid& out_view
+    std::vector<cv::Point2d>& out_candidates
 ) {
-    double corner_mean = (mono8.at<uchar>(5, 5) +
-                          mono8.at<uchar>(5, mono8.cols - 6) +
-                          mono8.at<uchar>(mono8.rows - 6, 5) +
-                          mono8.at<uchar>(mono8.rows - 6, mono8.cols - 6)) / 4.0;
+    out_candidates.clear();
     cv::Mat processed_img;
-    if (corner_mean > 128.0) {
+    if (invert) {
         cv::bitwise_not(mono8, processed_img);
     } else {
         processed_img = mono8;
@@ -236,17 +277,17 @@ bool extractMultiViewSingleGrid(
     cv::Mat tophat;
     cv::morphologyEx(processed_img, tophat, cv::MORPH_TOPHAT, kernel);
 
-    cv::Mat binary;
-    cv::threshold(tophat, binary, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
-
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(binary, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    if (contours.empty()) {
+    double otsu_val = cv::threshold(tophat, tophat, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+    if (otsu_val <= 8.0) {
         return false;
     }
 
-    std::vector<cv::Point2d> candidate_points;
-    candidate_points.reserve(contours.size());
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(tophat, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    if (contours.empty() || contours.size() > 50000) {
+        return false;
+    }
+
     const double min_area = std::min(processed_img.cols, processed_img.rows) > 1000 ? 450.0 : 40.0;
     for (const auto& cnt : contours) {
         double area = cv::contourArea(cnt);
@@ -263,12 +304,28 @@ bool extractMultiViewSingleGrid(
         }
         cv::Moments m = cv::moments(cnt);
         if (m.m00 > 0.0) {
-            candidate_points.emplace_back(m.m10 / m.m00, m.m01 / m.m00);
+            out_candidates.emplace_back(m.m10 / m.m00, m.m01 / m.m00);
         }
     }
 
-    if (candidate_points.size() < static_cast<size_t>(grid_columns * grid_rows * 0.70)) {
-        return false;
+    return out_candidates.size() >= static_cast<size_t>(grid_columns * grid_rows * 0.65);
+}
+
+bool extractMultiViewSingleGrid(
+    const cv::Mat& mono8,
+    int grid_columns,
+    int grid_rows,
+    double point_spacing_mm,
+    ExtractedViewGrid& out_view
+) {
+    bool initial_invert = determineImageInversion(mono8);
+    std::vector<cv::Point2d> candidate_points;
+
+    // 双重极性自适应保障：优先直方图判定分支，若提取不足自动尝试反转分支
+    if (!extractCandidatesWithInversion(mono8, initial_invert, grid_columns, grid_rows, candidate_points)) {
+        if (!extractCandidatesWithInversion(mono8, !initial_invert, grid_columns, grid_rows, candidate_points)) {
+            return false;
+        }
     }
 
     std::vector<double> nn_dists;
@@ -303,11 +360,16 @@ bool extractMultiViewSingleGrid(
     }
     out_view.estimated_pitch = est_pitch;
 
+    // 增强型中心特征 Mark 容错识别与多维打分机制
     cv::Point2d center_mark(0.0, 0.0);
     bool found_center_mark = false;
+    double best_score = -1e9;
+
     for (size_t i = 0; i < candidate_points.size(); ++i) {
         double min_d = std::numeric_limits<double>::infinity();
-        int close_count = 0;
+        std::vector<double> close_dists;
+        std::vector<cv::Point2d> close_pts;
+
         for (size_t j = 0; j < candidate_points.size(); ++j) {
             if (i == j) {
                 continue;
@@ -316,14 +378,41 @@ bool extractMultiViewSingleGrid(
             if (d < min_d) {
                 min_d = d;
             }
-            if (d >= est_pitch * 0.65 && d <= est_pitch * 0.80) {
-                close_count++;
+            if (d >= est_pitch * 0.65 && d <= est_pitch * 0.82) {
+                close_dists.push_back(d);
+                close_pts.push_back(candidate_points[j]);
             }
         }
-        if (min_d >= est_pitch * 0.65 && close_count == 4) {
-            center_mark = candidate_points[i];
-            found_center_mark = true;
-            break;
+
+        // 过滤半周期密集点列(如刻度尺等噪点)
+        if (min_d < est_pitch * 0.60) {
+            continue;
+        }
+
+        const size_t k = close_dists.size();
+        if (k >= 3 && k <= 5) {
+            cv::Point2d cg(0.0, 0.0);
+            for (const auto& cp : close_pts) {
+                cg += cp;
+            }
+            cg.x /= static_cast<double>(k);
+            cg.y /= static_cast<double>(k);
+            double cg_err = cv::norm(cg - candidate_points[i]);
+
+            double base_score = (k == 4) ? 100.0 : ((k == 3) ? 70.0 : 60.0);
+            double penalty_cg = (cg_err / est_pitch) * 100.0;
+            double avg_dist_err = 0.0;
+            for (double cd : close_dists) {
+                avg_dist_err += std::abs(cd - 0.7071 * est_pitch);
+            }
+            avg_dist_err = (avg_dist_err / static_cast<double>(k) / est_pitch) * 50.0;
+
+            double score = base_score - penalty_cg - avg_dist_err;
+            if (score > best_score) {
+                best_score = score;
+                center_mark = candidate_points[i];
+                found_center_mark = true;
+            }
         }
     }
 
@@ -366,12 +455,17 @@ bool extractMultiViewSingleGrid(
         for (int c = 0; c < grid_columns; ++c) {
             int idx = r * grid_columns + c;
             if (assigned[idx] >= 0) {
-                out_view.points.push_back({r, c, candidate_points[assigned[idx]]});
+                OrderedGridPoint pt;
+                pt.row = r;
+                pt.column = c;
+                pt.source_center = cv::Point2f(static_cast<float>(candidate_points[assigned[idx]].x),
+                                               static_cast<float>(candidate_points[assigned[idx]].y));
+                out_view.points.push_back(pt);
             }
         }
     }
 
-    return out_view.points.size() >= static_cast<size_t>(grid_rows * grid_columns * 0.85);
+    return out_view.points.size() >= static_cast<size_t>(grid_rows * grid_columns * 0.70);
 }
 
 } // namespace
@@ -396,8 +490,15 @@ Status DistortionCorrectionModule::createDotGridTemplate(
 
     std::vector<cv::KeyPoint> keypoints;
     createDarkCircleDetector(mono8.size())->detect(mono8, keypoints);
-    const std::vector<OrderedGridPoint> grid_points =
+    std::vector<OrderedGridPoint> grid_points =
         orderFixedViewDotGrid(keypoints, mono8.size(), grid_columns, grid_rows);
+    if (grid_points.empty()) {
+        cv::Mat inverted;
+        cv::bitwise_not(mono8, inverted);
+        keypoints.clear();
+        createDarkCircleDetector(mono8.size())->detect(inverted, keypoints);
+        grid_points = orderFixedViewDotGrid(keypoints, mono8.size(), grid_columns, grid_rows);
+    }
     if (grid_points.empty()) {
         return Status::Error(ErrorCode::FeatureNotFound, "fixed-view symmetric dot grid was not found");
     }
@@ -560,6 +661,29 @@ Status DistortionCorrectionModule::createMultiViewDotGridTemplate(
             return Status::Error(ErrorCode::FeatureNotFound, cv::format("failed to detect dot grid in view %d", static_cast<int>(i)));
         }
         extracted_views.push_back(view_grid);
+    }
+
+    // 自动识别与校准 5 视野的空间拓扑象限 (自纠偏防御机制，即使外部传入顺序颠倒也能正确对齐)
+    for (size_t v_idx = 0; v_idx < extracted_views.size(); ++v_idx) {
+        if (!extracted_views[v_idx].has_center_mark) {
+            continue;
+        }
+        const double dx = extracted_views[v_idx].center_mark.x - expected_size.width / 2.0;
+        const double dy = extracted_views[v_idx].center_mark.y - expected_size.height / 2.0;
+
+        CalibrationViewPosition inferred_pos = CalibrationViewPosition::Center;
+        if (std::abs(dx) < 0.15 * expected_size.width && std::abs(dy) < 0.15 * expected_size.height) {
+            inferred_pos = CalibrationViewPosition::Center;
+        } else if (dx < 0 && dy < 0) {
+            inferred_pos = CalibrationViewPosition::TopLeft;
+        } else if (dx < 0 && dy > 0) {
+            inferred_pos = CalibrationViewPosition::BottomLeft;
+        } else if (dx > 0 && dy < 0) {
+            inferred_pos = CalibrationViewPosition::TopRight;
+        } else {
+            inferred_pos = CalibrationViewPosition::BottomRight;
+        }
+        extracted_views[v_idx].position = inferred_pos;
     }
 
     // 2. 多视野控制点集合与理想空间投影映射
@@ -746,7 +870,7 @@ Status DistortionCorrectionModule::createMultiViewDotGridTemplate(
         std::string view_title = "Center View";
         cv::Scalar view_color(255, 255, 0); // 青色 (BGR)
 
-        switch (views[v_idx].position) {
+        switch (extracted_views[v_idx].position) {
         case CalibrationViewPosition::TopLeft:
             grid_r = 0;
             grid_c = 0;
