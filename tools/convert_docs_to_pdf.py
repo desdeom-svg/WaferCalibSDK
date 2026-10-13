@@ -3,6 +3,7 @@ import re
 import base64
 import subprocess
 import markdown
+from markdown.extensions.toc import slugify_unicode
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -46,7 +47,8 @@ def main():
     # 3. 使用 Python markdown 将 markdown 转为 html
     html_body = markdown.markdown(
         md_text,
-        extensions=['tables', 'fenced_code', 'toc']
+        extensions=['tables', 'fenced_code', 'toc'],
+        extension_configs={'toc': {'slugify': slugify_unicode}}
     )
 
     # 4. 生成带有优雅印刷样式的 HTML
@@ -153,7 +155,9 @@ pre {{
   padding: 10px 12px;
   font-size: 11px;
   line-height: 1.45;
-  page-break-inside: avoid;
+  page-break-inside: auto;
+  orphans: 3;
+  widows: 3;
   white-space: pre-wrap !important;
   word-break: break-all;
 }}

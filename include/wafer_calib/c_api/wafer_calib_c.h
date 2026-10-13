@@ -46,6 +46,75 @@ extern "C" {
 /** @brief 三阶二维多项式中每个输出坐标轴的系数数量。 */
 #define WAFER_DOT_GRID_POLYNOMIAL_COEFFICIENT_COUNT 10
 
+/** @brief 四视野晶圆外缘圆拟合结果；失败时全部字段为 NaN。 */
+typedef struct WaferEdgeCircleResult {
+    double center_x_mm;       /**< 圆心定位轴 X，mm。 */
+    double center_y_mm;       /**< 圆心定位轴 Y，mm。 */
+    double radius_mm;         /**< 光学外缘拟合半径，mm。 */
+    double rms_residual_um;   /**< 四方向等权的有效点径向 RMS，um。 */
+    double max_residual_um;   /**< 有效点的最大绝对径向残差，um。 */
+} WaferEdgeCircleResult;
+
+/**
+ * @brief 固定四视野外缘亚像素定位并联合拟合晶圆圆心。
+ * @param image_buffers 恰好4个只读图像指针，顺序为当前采集编号0/1/2/3。
+ * 每张为同尺寸紧凑Mono8，至少width*height字节；同步调用，不修改或保留指针。
+ * 0/1图黑场在右侧，2/3图黑场在左侧。
+ * @param stage_xy_mm 恰好8个有限轴反馈坐标：X0,Y0,X1,Y1,X2,Y2,X3,Y3，mm。
+ * 采图θ保持不变，0/1为X正侧，2/3为X负侧，0/2为Y正侧，1/3为Y负侧。
+ * @param width 图像宽，至少512像素。
+ * @param height 图像高，至少256像素。
+ * @param pixel_size_um XY统一像素当量，um/px，有限正数。
+ * @param result 必填输出；仅返回WAFER_SUCCESS时有效。
+ * @details 固定映射X=Sx+(u-width/2)*scale，Y=Sy-(v-height/2)*scale，scale=像素当量/1000。
+ * 假定相机无安装旋转、图像未翻转且XY像素当量相同。内部采用局部归一化比例0.15定位。
+ * RMS为四方向均方残差的等权平方根，不表示圆心绝对精度；半径是光学边缘半径。
+ * @return WAFER_SUCCESS或现有WAFER_ERR_*；失败时非空result全部字段置NaN。
+ */
+WAFER_API int Wafer_FindFourViewEdgeCircle(
+    const unsigned char** image_buffers,
+    const double* stage_xy_mm,
+    int width,
+    int height,
+    double pixel_size_um,
+    WaferEdgeCircleResult* result
+);
+
+/** @brief 八视野结果，六个double共48字节；旧四视野结果结构不变。 */
+typedef struct WaferEightViewEdgeCircleResult {
+    double center_x_mm;
+    double center_y_mm;
+    double radius_mm;
+    double rms_residual_um;
+    double max_residual_um;
+    double notch_angle_deg; /**< 相对轴-Y，向+X为正；缺口角度不可用时为NaN。 */
+} WaferEightViewEdgeCircleResult;
+
+/**
+ * @brief 固定八视野外缘圆拟合与第7图notch方向计算；六参数。
+ * @param image_buffers 恰好8个紧凑Mono8缓冲区，尺寸相同，同步只读。
+ * 顺序0/1/2/3为原四个对角，4为+X、5为-X、6为+Y、7为-Y（含notch）。
+ * 0/1/4黑场在右，2/3/5在左，6在上，7在下。
+ * @param stage_xy_mm 恰好16个实际轴坐标X0,Y0,...,X7,Y7，mm；采图theta固定。
+ * @param width 图像宽，至少512。
+ * @param height 图像高，至少512。
+ * @param pixel_size_um 统一XY像素当量um/px，有限正数。
+ * @param result 必填；成功时圆心、半径、残差有效。角度须另外检查是否有限。
+ * @details 沿用四图映射：X=Sx+(u-width/2)*scale，Y=Sy-(v-height/2)*scale。
+ * 不包含相机转角、倍率参考点偏移及畸变补偿。notch不参与圆拟合。
+ * 第7图0.3~1.0mm径向深度截面至少3个具有唯一左右交点时，取中线角度中位数。
+ * 无缺口/角度不可辨时仍可成功返回圆心，notch_angle_deg为NaN。
+ * 失败时六个输出double全部NaN；RMS不是圆心绝对误差。
+ */
+WAFER_API int Wafer_FindEightViewEdgeCircle(
+    const unsigned char** image_buffers,
+    const double* stage_xy_mm,
+    int width,
+    int height,
+    double pixel_size_um,
+    WaferEightViewEdgeCircleResult* result
+);
+
 /**
  * @brief 单张规则点阵建立的固定视野畸变校正模板。
  *

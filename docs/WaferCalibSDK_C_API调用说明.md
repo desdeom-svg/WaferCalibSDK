@@ -63,6 +63,19 @@
   - [9.3 核心接口说明 (极简 3 接口参数详解)](#93-核心接口说明-极简-3-接口参数详解)
   - [9.4 C# 调用代码示例 (纯内存流与在线对位)](#94-c-调用代码示例-纯内存流与在线对位)
   - [9.5 实测标定与综合诊断大图展示](#95-实测标定与综合诊断大图展示)
+- [十、 四视野晶圆外缘圆心功能 (FourViewEdgeCircle)](#十-四视野晶圆外缘圆心功能-fourviewedgecircle)
+  - [10.1 采集条件与坐标约定](#101-采集条件与坐标约定)
+  - [10.2 结果结构体与六参数接口](#102-结果结构体与六参数接口)
+  - [10.3 C# 调用示例](#103-c-调用示例)
+  - [10.4 自适应边缘定位与错误处理](#104-自适应边缘定位与错误处理)
+  - [10.5 两组图片 DLL 实测结果与精度边界](#105-两组图片-dll-实测结果与精度边界)
+- [十一、 八视野晶圆外缘圆心与 notch 角度功能 (EightViewEdgeCircle)](#十一-八视野晶圆外缘圆心与-notch-角度功能-eightviewedgecircle)
+  - [11.1 八方向采集顺序与坐标约定](#111-八方向采集顺序与坐标约定)
+  - [11.2 结果结构体与六参数接口](#112-结果结构体与六参数接口)
+  - [11.3 C# 调用示例](#113-c-调用示例)
+  - [11.4 notch 定位与错误处理](#114-notch-定位与错误处理)
+  - [11.5 DLL 与 C# 实测结果及标定限制](#115-dll-与-c-实测结果及标定限制)
+  - [11.6 从四图迁移到八图](#116-从四图迁移到八图)
 - [附录：C++ 原生模块架构参考](#附录c-原生模块架构参考)
 
 ---
@@ -94,7 +107,7 @@
 | `WAFER_ERR_FILE_IO` | 6 | 文件读写失败 | 检查目标路径是否存在、是否具备写入权限或配方文件是否已损坏。 |
 | `WAFER_ERR_UNKNOWN` | 999 | 未分类异常 | 内部未捕获的严重异常，请检查底层运行日志。 |
 
-> **调用准则**：在读取输出参数（如坐标、角度、校正图）之前，**必须首先断言返回值等于 0 (`WAFER_SUCCESS`)**。
+> **调用准则**：在读取输出参数（如坐标、角度、校正图）之前，**必须首先断言返回值等于 0 (`WAFER_SUCCESS`)**。八视野接口另有部分结果约定：返回 0 表示圆心有效，角度仍须检查是否为有限数值，详见 11.4 节。
 
 ### 1.3 C# P/Invoke 原生互操作基类定义
 
@@ -253,6 +266,53 @@ namespace WaferVisionSystem.Interop {
             out double offsetX,
             out double offsetY,
             IntPtr resultBgr
+        );
+
+        // 四视野晶圆外缘圆心：五个double，8字节对齐，总大小40字节
+        [StructLayout(LayoutKind.Sequential, Pack = 8)]
+        public struct WaferEdgeCircleResult {
+            public double CenterXmm;
+            public double CenterYmm;
+            public double RadiusMm;
+            public double RmsResidualUm;
+            public double MaxResidualUm;
+        }
+
+        [DllImport(DllName, ExactSpelling = true,
+            CallingConvention = CallingConvention.Cdecl)]
+        public static extern int Wafer_FindFourViewEdgeCircle(
+            [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 4)]
+            IntPtr[] imageBuffers,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 8)]
+            double[] stageXYmm,
+            int width,
+            int height,
+            double pixelSizeUm,
+            out WaferEdgeCircleResult result
+        );
+
+        // 八视野晶圆外缘圆心与notch角度：六个double，共48字节
+        [StructLayout(LayoutKind.Sequential, Pack = 8)]
+        public struct WaferEightViewEdgeCircleResult {
+            public double CenterXmm;
+            public double CenterYmm;
+            public double RadiusMm;
+            public double RmsResidualUm;
+            public double MaxResidualUm;
+            public double NotchAngleDeg;
+        }
+
+        [DllImport(DllName, ExactSpelling = true,
+            CallingConvention = CallingConvention.Cdecl)]
+        public static extern int Wafer_FindEightViewEdgeCircle(
+            [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 8)]
+            IntPtr[] imageBuffers,
+            [In, MarshalAs(UnmanagedType.LPArray, SizeConst = 16)]
+            double[] stageXYmm,
+            int width,
+            int height,
+            double pixelSizeUm,
+            out WaferEightViewEdgeCircleResult result
         );
 
         // 平台旋转中心最大支持点数
@@ -1750,6 +1810,400 @@ public class AxisPixelCalibrationService {
 | *看板图解：<br>1. **左侧 3×3 视场特写与走位轨迹图**：9 宫格完整呈现 9 个点位微标的局部放大，绿色绘制高精度亚像素检测圆与十字中心，黄色粗箭头直观还原从中心 Mark_0 出发逆时针环绕外周单步步进的 $0 \to 1 \to 2 \to \dots \to 8$ 拓扑闭环轨迹；<br>2. **右上重投影残差矢量图 (放大 500x)**：灰色十字表示标称理想网格位置，绿色小圆表示由实际像素反算得到的绝对物理位置，红色矢量箭头将误差放大 500 倍呈现，清晰呈现两轴各向同性极优；<br>3. **右下精密参数与残差明细面板**：详细列出像元分辨率 $s_x = 0.9004\ \mu\text{m/px}, s_y = 0.9009\ \mu\text{m/px}$、长宽比 $0.9994$、安装旋转倾角 $-0.0929^\circ$，以及**全局 RMS 残差仅 $0.670\ \mu\text{m}$ ($0.74\text{ px}$)**、最大单点误差仅 $1.047\ \mu\text{m}$ 的计量级精度。* |
 
 ---
+
+## 十、 四视野晶圆外缘圆心功能 (FourViewEdgeCircle)
+
+本接口在晶圆四个方向分别采集局部外缘图，结合对应的 XY 轴反馈坐标，计算统一定位轴坐标下的圆心、光学外缘半径及拟合残差。四张图通过一个图像指针数组传入，八个坐标通过一个坐标数组传入，接口固定为六个参数。
+
+### 10.1 采集条件与坐标约定
+
+- 相机固定，四次采图时 θ 保持不变，只移动 XY。四个采集方向可为圆周的对角方向；“相隔 90°”表示 XY 采集位置的周向分布，不表示旋转 θ 轴。
+- 四张图尺寸相同，均为紧凑存储 Mono8；每张至少 `width * height` 字节，宽至少 512、高至少 256 像素。须先解码图片；不得将 `File.ReadAllBytes()` 得到的 BMP/JPEG 文件字节直接作为像素传入。
+- 图序固定为当前采集编号 0、1、2、3。每组 XY 必须与对应图像一致；坐标采用曝光时实际反馈位置，单位 mm。
+- XY 像素当量相同，`pixel_size_um` 单位是 μm/px，例如 5X 传入 `0.9`。相机与轴的方向固定，无安装旋转；翻转、旋转图像或改变机械方向后不能直接沿用本接口约定。
+
+| 图序 | 数组中的坐标 | 采集轴象限 | 黑场所在侧 |
+|---|---|---|---|
+| 0 | `X0, Y0` | X 正侧、Y 正侧 | 图像右侧 |
+| 1 | `X1, Y1` | X 正侧、Y 负侧 | 图像右侧 |
+| 2 | `X2, Y2` | X 负侧、Y 正侧 | 图像左侧 |
+| 3 | `X3, Y3` | X 负侧、Y 负侧 | 图像左侧 |
+
+这里的正负侧是相对采集布局中心而言，并非轴坐标数值必须为正或负。入口要求 `X0 > X2`、`X1 > X3`、`Y0 > Y1`、`Y2 > Y3`。
+
+图像参考点固定为 `(width / 2.0, height / 2.0)`。令 `scale = pixel_size_um / 1000.0`，图像像素 `(u, v)` 映射为：
+
+```text
+X = Xi + (u - width  / 2.0) * scale
+Y = Yi - (v - height / 2.0) * scale
+```
+
+输出圆心是上述约定下的定位轴坐标。它不是图像像素圆心，也不是平台旋转中心；运动补偿须由上位机根据目标点位计算。对 4096 像素图像，参考点为 2048，不能混用 2047.5；在 0.9 μm/px 下，混用会引入每轴 0.45 μm 的坐标差。
+
+### 10.2 结果结构体与六参数接口
+
+```c
+typedef struct WaferEdgeCircleResult {
+    double center_x_mm;
+    double center_y_mm;
+    double radius_mm;
+    double rms_residual_um;
+    double max_residual_um;
+} WaferEdgeCircleResult;
+
+WAFER_API int Wafer_FindFourViewEdgeCircle(
+    const unsigned char** image_buffers,
+    const double* stage_xy_mm,
+    int width,
+    int height,
+    double pixel_size_um,
+    WaferEdgeCircleResult* result
+);
+```
+
+| 参数 | 说明 |
+|---|---|
+| `image_buffers` | 恰好 4 个有效图像指针，按 0、1、2、3 排列。同步只读，不修改或保留图像指针。 |
+| `stage_xy_mm` | 恰好 8 个有限数值，顺序为 `X0,Y0,X1,Y1,X2,Y2,X3,Y3`，单位 mm。 |
+| `width` | 四张图共用的宽度，至少 512 像素。 |
+| `height` | 四张图共用的高度，至少 256 像素；`width * height` 不得超过有符号 32 位整数上限。 |
+| `pixel_size_um` | 有限正数，XY 共用的像素当量，单位 μm/px。 |
+| `result` | 必填结果指针；五个 double，共 40 字节，默认 8 字节对齐。仅返回 0 时有效。 |
+
+| 输出字段 | 单位 | 定义 |
+|---|---|---|
+| `center_x_mm` | mm | 圆心定位轴 X 坐标。 |
+| `center_y_mm` | mm | 圆心定位轴 Y 坐标。 |
+| `radius_mm` | mm | 光学外缘拟合半径，未校正倒角或散射导致的机械外径差异。 |
+| `rms_residual_um` | μm | 对各方向分别计算有效点的平均径向平方残差，再对四方向等权平均并开平方。 |
+| `max_residual_um` | μm | 所有最终有效边缘点的最大绝对径向残差。 |
+
+本接口不含图像数量和数组容量参数，原生函数无法检测实际分配长度，调用方必须保证数组和像素缓冲区满足以上合同。SDK 不分配输出图像，结果通过结构体返回。
+
+### 10.3 C# 调用示例
+
+使用 1.3 节中的 `WaferCalibNative.WaferEdgeCircleResult` 和 P/Invoke 声明。以下包装函数接收一个 `byte[][]` 图像参数及一个 `double[]` 坐标参数，负责参数检查和图像内存固定；所有指针在同步调用结束后释放。
+
+```csharp
+using System;
+using System.Runtime.InteropServices;
+using WaferVisionSystem.Interop;
+
+public static class FourViewEdgeCircleDemo {
+    public static WaferCalibNative.WaferEdgeCircleResult Calculate(
+        byte[][] images, double[] stageXYmm,
+        int width, int height, double pixelSizeUm) {
+
+        if (images == null || images.Length != 4 ||
+            stageXYmm == null || stageXYmm.Length != 8)
+            throw new ArgumentException("必须输入4张图像及8个XY坐标。");
+        if (width < 512 || height < 256 ||
+            double.IsNaN(pixelSizeUm) ||
+            double.IsInfinity(pixelSizeUm) || pixelSizeUm <= 0)
+            throw new ArgumentException("尺寸或像素当量无效。");
+
+        int bytes = checked(width * height);
+        for (int i = 0; i < 4; ++i) {
+            if (images[i] == null || images[i].Length != bytes)
+                throw new ArgumentException("需要紧凑Mono8像素数据。");
+        }
+        foreach (double value in stageXYmm) {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                throw new ArgumentException("轴坐标必须为有限数值。");
+        }
+
+        var handles = new GCHandle[4];
+        var pointers = new IntPtr[4];
+        try {
+            for (int i = 0; i < 4; ++i) {
+                handles[i] = GCHandle.Alloc(
+                    images[i], GCHandleType.Pinned);
+                pointers[i] = handles[i].AddrOfPinnedObject();
+            }
+            WaferCalibNative.WaferEdgeCircleResult result;
+            int status = WaferCalibNative.Wafer_FindFourViewEdgeCircle(
+                pointers, stageXYmm, width, height,
+                pixelSizeUm, out result);
+            if (status != WaferCalibNative.WAFER_SUCCESS)
+                throw new InvalidOperationException(
+                    "圆心计算失败，错误码：" + status);
+            return result;
+        }
+        finally {
+            for (int i = 0; i < 4; ++i) {
+                if (handles[i].IsAllocated) handles[i].Free();
+            }
+        }
+    }
+}
+```
+
+业务调用示例（`image0` 至 `image3` 为已经解码的 4096 × 4096 Mono8 像素数组）：
+
+```csharp
+var result = FourViewEdgeCircleDemo.Calculate(
+    new[] { image0, image1, image2, image3 },
+    new double[] {
+         105.033,  189.6687,
+         105.033,  -22.46332,
+        -107.099,  189.6687,
+        -107.099,  -22.46332
+    },
+    4096, 4096, 0.9);
+
+Console.WriteLine($"圆心：({result.CenterXmm:F6}, {result.CenterYmm:F6}) mm");
+Console.WriteLine($"半径：{result.RadiusMm:F6} mm");
+Console.WriteLine($"RMS残差：{result.RmsResidualUm:F3} μm");
+Console.WriteLine($"最大残差：{result.MaxResidualUm:F3} μm");
+```
+
+项目内可独立编译运行的 x64 示例见 `samples/FourViewEdgeCircleSample.cs`，含 BMP 灰度解码、去除行填充及两组图片回放。使用 Cdecl 调用约定；示例和 DLL 均按 x64 编译，结构体使用 `Sequential, Pack = 8`。
+
+### 10.4 自适应边缘定位与错误处理
+
+初版在局部外缘区域估计背景灰度 B 与片内信号灰度 S，使用 `T = B + 0.15 * (S - B)` 定位亚像素交点。流程为高斯平滑、逐行粗定位、局部归一化阈值、二次曲线及 MAD 异常点过滤、四方向等权几何圆拟合。
+
+该规则可抵抗近似线性的亮度增益和背景偏置变化，但不同晶圆反射率引起的边缘剖面形状变化仍需实物标定；0.15 是初版候选比例，不是已完成跨材料精度验收的通用常数。
+
+| 返回值 | 本接口中的含义及处理 |
+|---|---|
+| 0 | 成功，可读取结果。 |
+| 1 | 空指针、尺寸、像素当量、坐标或固定图序对应的点位关系不合法。 |
+| 4 | 任一方向缺少可靠外缘：对比度、噪声、饱和、有效点数或覆盖长度不满足要求。 |
+| 5 | 圆拟合失败、不收敛，或 RMS 超过 `10 * pixel_size_um` μm。 |
+| 999 | 内部异常。 |
+
+失败时，只要 `result` 非空，五个输出字段均设为 NaN；调用方必须首先检查返回码。两个残差字段仅统计剔除异常后的有效点，不能用它们替代圆心绝对误差或重复性测试。
+
+### 10.5 两组图片 DLL 实测结果与精度边界
+
+2026-10-12 使用 Release x64 DLL、OpenCV 4.10.0，以 0.9 μm/px 处理两组原始四方向图像，结果如下。单位：圆心和半径为 mm，残差为 μm。
+
+| 图片组 | 圆心 X | 圆心 Y | 半径 | RMS | 最大残差 |
+|---|---:|---:|---:|---:|---:|
+| EdgeImage_5X | -1.022132 | 83.606767 | 149.642378 | 8.016 | 11.962 |
+| EdgeImage 光片 | -1.113238 | 83.999999 | 149.728479 | 3.951 | 7.480 |
+
+- 两组均通过实际 DLL 返回成功。C# x64 P/Invoke 与 Python ctypes 的全部 10 个输出数值在 1e-12 容差内一致。
+- 新增合同测试 3 项通过，包含已知圆心合成图、亮度/偏置变化、噪声、尺寸边界、输入只读、非法参数及失败 NaN；相关已有接口回归通过。
+- 原晶圆结果相对旧固定阈值 10 基线的圆心差约 5.9 μm；光片差约 0.33 μm。这是算法间差异，不是相对独立真实圆心的误差。
+- 尚未取得两片独立实际圆心真值、跨反射率多片样本及重复采集数据，本初版不声明达到 ±1 μm 精度。
+
+测试记录见 `output/FourViewEdgeCircle/TEST_REPORT.md`；两组结果及输入、DLL 的 SHA256 见 `output/FourViewEdgeCircle/dll_replay.json`。新增导出位于本次构建的 `build/Release/WaferCalibSDK.dll`；`docs` 中较旧的 DLL 未随文档更新覆盖，集成时应选择含本导出的 DLL。
+
+---
+
+## 十一、 八视野晶圆外缘圆心与 notch 角度功能 (EightViewEdgeCircle)
+
+本版按最小接口改动扩展为固定八图输入，输出增加一个 notch 角度，仍为六个参数。新增导出 `Wafer_FindEightViewEdgeCircle`；第十章的旧四图接口及 40 字节结果结构保持不变。新增结果结构为 48 字节，不能与旧结构混用。
+
+### 11.1 八方向采集顺序与坐标约定
+
+相机固定、θ 保持不变，仅移动 XY，按 0～7 顺序采集。八张图须为同尺寸、紧凑 Mono8，每张至少 `width * height` 字节；宽高均至少 512 像素，像素数不得超过有符号 32 位整数上限。输入已解码像素，不是 BMP/JPEG/PNG 文件字节。接口同步只读，不修改或保留指针。
+
+| 图序 | 坐标数组中的位置 | 采集方向 | 黑场所在侧 |
+|---|---|---|---|
+| 0 | `X0,Y0` | +X、+Y 对角 | 右 |
+| 1 | `X1,Y1` | +X、-Y 对角 | 右 |
+| 2 | `X2,Y2` | -X、+Y 对角 | 左 |
+| 3 | `X3,Y3` | -X、-Y 对角 | 左 |
+| 4 | `X4,Y4` | +X | 右 |
+| 5 | `X5,Y5` | -X | 左 |
+| 6 | `X6,Y6` | +Y | 上 |
+| 7 | `X7,Y7` | -Y，包含 notch | 下 |
+
+坐标单位 mm，应使用曝光时实际轴反馈，必须与图片一一对应。采集方向正负指相对布局中心，不要求坐标数值本身为正或负。入口检查 `X0 > X2`、`X1 > X3`、`Y0 > Y1`、`Y2 > Y3`、`X4 > X5`、`Y6 > Y7`。
+
+仍采用第十章固定映射：
+
+```text
+scale = pixel_size_um / 1000.0
+X = Xi + (u - width  / 2.0) * scale
+Y = Yi - (v - height / 2.0) * scale
+```
+
+图像参考点为 `(width/2.0, height/2.0)`；本版不包含相机安装转角、倍率参考点偏移、非等比尺度或畸变补偿。
+
+### 11.2 结果结构体与六参数接口
+
+```c
+typedef struct WaferEightViewEdgeCircleResult {
+    double center_x_mm;
+    double center_y_mm;
+    double radius_mm;
+    double rms_residual_um;
+    double max_residual_um;
+    double notch_angle_deg;
+} WaferEightViewEdgeCircleResult;
+
+WAFER_API int Wafer_FindEightViewEdgeCircle(
+    const unsigned char** image_buffers,
+    const double* stage_xy_mm,
+    int width,
+    int height,
+    double pixel_size_um,
+    WaferEightViewEdgeCircleResult* result
+);
+```
+
+| 参数 | 说明 |
+|---|---|
+| `image_buffers` | 一个参数传入恰好 8 个有效图像指针，固定顺序 0～7。 |
+| `stage_xy_mm` | 一个参数传入恰好 16 个有限坐标，`X0,Y0,...,X7,Y7`，单位 mm。 |
+| `width` / `height` | 八图统一宽高，各至少 512；图像行步长等于 width。 |
+| `pixel_size_um` | XY 共用的有限正像素当量，单位 μm/px。 |
+| `result` | 必填输出指针；六个 double，8 字节对齐，总大小 48 字节。 |
+
+| 输出字段 | 单位 | 定义 |
+|---|---|---|
+| `center_x_mm` / `center_y_mm` | mm | 圆心定位轴坐标。 |
+| `radius_mm` | mm | 光学外缘拟合半径，未补偿倒角与光学散射。 |
+| `rms_residual_um` | μm | 各视图有效边缘点径向均方残差的八方向等权平方根。 |
+| `max_residual_um` | μm | 全部最终有效圆边点的最大绝对径向残差。 |
+| `notch_angle_deg` | ° | notch 相对轴坐标 -Y 的偏角，向 +X 为正；不可用时为 NaN。 |
+
+notch 区域不参与圆拟合。设 N 为缺口中线上的代表点，C 为圆心，角度约定可表示为 `atan2(Nx-Cx, Cy-Ny) * 180/pi`。这不是 die/Mark 排列角度，也不是机械 θ 轴反馈值。
+
+原生函数不包含数组容量参数，不能检测调用方实际分配长度；调用方必须保证八个指针、十六个坐标和每张图像缓冲区均满足合同。
+
+### 11.3 C# 调用示例
+
+使用 1.3 节中的 `WaferCalibNative.WaferEightViewEdgeCircleResult` 和八图 P/Invoke 声明。以下包装固定八个像素数组，在同步调用结束后释放固定句柄。
+
+```csharp
+using System;
+using System.Runtime.InteropServices;
+using WaferVisionSystem.Interop;
+
+public static class EightViewEdgeCircleDemo {
+    public static WaferCalibNative.WaferEightViewEdgeCircleResult Calculate(
+        byte[][] images, double[] stageXYmm,
+        int width, int height, double pixelSizeUm) {
+
+        if (images == null || images.Length != 8 ||
+            stageXYmm == null || stageXYmm.Length != 16)
+            throw new ArgumentException("必须输入8张图像及16个XY坐标。");
+        if (width < 512 || height < 512 ||
+            double.IsNaN(pixelSizeUm) ||
+            double.IsInfinity(pixelSizeUm) || pixelSizeUm <= 0)
+            throw new ArgumentException("尺寸或像素当量无效。");
+
+        int bytes = checked(width * height);
+        for (int i = 0; i < 8; ++i) {
+            if (images[i] == null || images[i].Length != bytes)
+                throw new ArgumentException("需要紧凑Mono8像素数据。");
+        }
+        foreach (double value in stageXYmm) {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                throw new ArgumentException("轴坐标必须为有限数值。");
+        }
+
+        var handles = new GCHandle[8];
+        var pointers = new IntPtr[8];
+        try {
+            for (int i = 0; i < 8; ++i) {
+                handles[i] = GCHandle.Alloc(
+                    images[i], GCHandleType.Pinned);
+                pointers[i] = handles[i].AddrOfPinnedObject();
+            }
+            WaferCalibNative.WaferEightViewEdgeCircleResult result;
+            int status = WaferCalibNative.Wafer_FindEightViewEdgeCircle(
+                pointers, stageXYmm, width, height,
+                pixelSizeUm, out result);
+            if (status != WaferCalibNative.WAFER_SUCCESS)
+                throw new InvalidOperationException(
+                    "圆心计算失败，错误码：" + status);
+            // 返回0只保证圆心有效，角度使用前还需检查NaN/Infinity。
+            return result;
+        }
+        finally {
+            for (int i = 0; i < 8; ++i) {
+                if (handles[i].IsAllocated) handles[i].Free();
+            }
+        }
+    }
+}
+```
+
+业务调用示例（`image0` 至 `image7` 为已解码的同尺寸 Mono8 数组）：
+
+```csharp
+var result = EightViewEdgeCircleDemo.Calculate(
+    new[] { image0, image1, image2, image3,
+            image4, image5, image6, image7 },
+    new double[] {
+         105.033,  189.6687,
+         105.033,  -22.46332,
+        -107.099,  189.6687,
+        -107.099,  -22.46332,
+         148.967,   83.6027,
+        -151.033,   83.6027,
+          -1.033,  233.6027,
+          -1.033,  -66.3973
+    },
+    4096, 4096, 1.8); // 2.5X名义换算值，尚未独立标定
+
+bool angleValid = !double.IsNaN(result.NotchAngleDeg)
+               && !double.IsInfinity(result.NotchAngleDeg);
+Console.WriteLine($"圆心=({result.CenterXmm:F6}, {result.CenterYmm:F6}) mm");
+Console.WriteLine($"半径={result.RadiusMm:F6} mm，RMS={result.RmsResidualUm:F3} um");
+if (angleValid)
+    Console.WriteLine($"notch偏角={result.NotchAngleDeg:F6} deg");
+else
+    Console.WriteLine("圆心有效，notch角度不可用。");
+```
+
+完整可运行的 .NET Framework x64 示例见 `samples/EightViewEdgeCircleSample.cs`。使用含新增导出的 x64 DLL，并保证配套 OpenCV 运行库可被加载；结果结构大小应为 `Marshal.SizeOf(typeof(WaferCalibNative.WaferEightViewEdgeCircleResult)) == 48`。
+
+### 11.4 notch 定位与错误处理
+
+正常圆边沿用局部归一化阈值、亚像素定位及二次曲线/MAD 异常点剔除。先用 0～6 图拟合参考圆，定位第 7 图向圆内凹陷的 notch 区并加保护带，将其排除后进行八图等权圆拟合。
+
+第 7 图轮廓变换为相对拟合圆的角度与径向深度，在 0.3～1.0 mm 的八个深度截面寻找唯一左右交点，至少三个有效截面时，取截面中线角度的中位数。反光造成的多交点截面及跨越较长缺失区的交点不使用。当前方案适用于已测约 1 mm 深的 notch，更小或严重遮挡的 notch 可能只返回圆心。
+
+| 返回状态 | 结果约定与处理 |
+|---|---|
+| `0` | 圆心、半径、残差有效；角度须另行检查 NaN/Infinity。 |
+| `1` | 参数无效：空指针、尺寸过小、坐标非有限、像素比非法或采集顺序不满足约定。 |
+| `4` | 任一方向正常圆边点不足、对比度不足或 notch 排除后正常圆弧不足。 |
+| `5` | 圆拟合不收敛、几何无效，或 RMS 超过 `10 * pixel_size_um` μm。 |
+| `999` | 内部异常。 |
+
+**圆心有效但角度不可辨时返回 0，仅 `notch_angle_deg` 为 NaN。** 无 notch、缺口过浅或有效截面不足都可能出现此情况。失败时，非空结果结构的六个字段全部为 NaN；不可只看返回码 0 就直接使用角度。
+
+### 11.5 DLL 与 C# 实测结果及标定限制
+
+以下为实际调用本版 Release x64 DLL 的结果，非先前离线脚本结果。像素比分别由 5X 的 0.9 μm/px 换算为 1.5X 的 3.0 和 2.5X 的 1.8 μm/px。
+
+| 数据集 | 圆心 X/mm | 圆心 Y/mm | 半径/mm | RMS/μm | notch/° |
+|---|---:|---:|---:|---:|---:|
+| EdgeImage_1.5X_thick_8 | -0.741851 | 84.207766 | 149.660431 | 18.890 | -0.412041 |
+| EdgeImage_2.5X_thick_8 | -1.125728 | 84.325289 | 149.659852 | 11.573 | -0.409433 |
+| EdgeImage_2.5X_8 | -1.451286 | 84.192658 | 149.738497 | 12.095 | -0.176680 |
+
+两组 thick 图片同时通过 C# x64 实际调用，六个输出与 ctypes 调用一致。新接口测试覆盖已知圆心、正负已知 notch 角度、无 notch、非法参数、输入只读及第八图参与拟合；旧四图回归通过。证据见 `output/EightViewEdgeCircle/dll_replay.json`、`csharp_replay.csv`、`TEST_REPORT.md`。
+
+本版尚未补偿跨倍率参考点偏移、实测尺度偏差及约 0.28° 的相机轴向偏差，因此两个倍率的圆心仍存在约 0.4 mm 差异。RMS 是边缘到圆的拟合残差，不是圆心绝对误差；角度也未通过独立基准验收。保留小数仅用于复算，不代表达到对应测量精度。
+
+使用本次构建的 `build/Release/WaferCalibSDK.dll`；`docs` 中旧 DLL 不会随说明文件更新而自动替换。
+
+### 11.6 从四图迁移到八图
+
+| 项目 | 旧四图接口 | 新八图接口 |
+|---|---|---|
+| 导出名 | `Wafer_FindFourViewEdgeCircle` | `Wafer_FindEightViewEdgeCircle` |
+| 图像指针数量 | 4 | 8，固定顺序 0～7 |
+| XY 坐标数量 | 8 | 16 |
+| 结果结构 | `WaferEdgeCircleResult` | `WaferEightViewEdgeCircleResult` |
+| 结构大小 | 40 字节 | 48 字节 |
+| 输出 | 圆心、半径、RMS、最大残差 | 原五字段加 notch 角度 |
+| 参数个数 | 6 | 6 |
+
+迁移时需同时更新 P/Invoke 导出名、数组数量和结果类型；仅增加图片数量、仍调用旧导出不会启用八图计算。不得给新接口传入 40 字节旧结果结构，否则会发生越界写入。旧导出及旧结果类型保留，已有四图调用可继续使用。
+
+---
+
+<div style="break-before: page; page-break-before: always;"></div>
 
 ## 附录：C++ 原生模块架构参考
 
