@@ -44,50 +44,150 @@ bool filterEdge(Points& points, int height) {
             if (std::abs(residual(p) - median) < limit) retained.push_back(p);
         if (retained.size() < 30) return false;
     }
-    if (retained.back().y - retained.front().y < height * .2) return false;
+    double min_y = retained.front().y;
+    double max_y = retained.front().y;
+    for (const auto& p : retained) {
+        if (p.y < min_y) {
+            min_y = p.y;
+        }
+        if (p.y > max_y) {
+            max_y = p.y;
+        }
+    }
+    if (max_y - min_y < height * 0.20) {
+        return false;
+    }
     points.swap(retained);
     return true;
+}
+
+bool extractEdgeDirectional(
+    const cv::Mat& smooth,
+    bool scan_from_right,
+    bool filter,
+    int density,
+    Points& points
+) {
+    points.clear();
+    const int width = smooth.cols;
+    const int height = smooth.rows;
+    const int margin = std::max(16, height / 32);
+    const int step = std::max(1, height / density);
+    std::vector<double> row(width);
+
+    for (int y = margin; y < height - margin; y += step) {
+        const float* source = smooth.ptr<float>(y);
+        for (int x = 0; x < width; ++x) {
+            row[x] = source[scan_from_right ? width - 1 - x : x];
+        }
+
+        const double bg = quantile(row, 0.10);
+        const double signal = quantile(row, 0.85);
+        if (signal - bg < 5.0) {
+            continue;
+        }
+
+        const double coarseThreshold = bg + 0.40 * (signal - bg);
+        int run = 0;
+        int coarse = -1;
+        for (int x = 0; x < width; ++x) {
+            run = (row[x] > coarseThreshold) ? (run + 1) : 0;
+            if (run == 15) {
+                coarse = x - 14;
+                break;
+            }
+        }
+        if (coarse < 130 || coarse >= width - 130) {
+            continue;
+        }
+
+        std::vector<double> exterior(row.begin() + coarse - 120, row.begin() + coarse - 60);
+        std::vector<double> interior(row.begin() + coarse + 30, row.begin() + coarse + 100);
+        const double b = quantile(exterior, 0.50);
+        const double s = quantile(interior, 0.50);
+        if (s - b < 5.0) {
+            continue;
+        }
+
+        std::vector<double> noise = exterior;
+        for (double& value : noise) {
+            value = std::abs(value - b);
+        }
+        const double sigma = 1.4826 * quantile(noise, 0.50);
+        const double threshold = b + 0.15 * (s - b);
+
+        if (threshold - b < 3.0 * sigma || s >= 254.0) {
+            continue;
+        }
+
+        for (int x = coarse - 100; x < coarse + 30; ++x) {
+            if (row[x] <= threshold && row[x + 1] > threshold) {
+                const double subpixel = x + (threshold - row[x]) / (row[x + 1] - row[x]);
+                const double actual_x = scan_from_right ? (width - 1.0 - subpixel) : subpixel;
+                points.emplace_back(actual_x, static_cast<double>(y));
+                break;
+            }
+        }
+    }
+
+    if (filter) {
+        return filterEdge(points, height);
+    }
+    return points.size() >= 30;
 }
 
 bool detectEdge(const cv::Mat& image, int view, Points& points, bool filter = true, int density = 256) {
     cv::Mat smooth;
     image.convertTo(smooth, CV_32F);
-    cv::GaussianBlur(smooth, smooth, cv::Size(), 2.);
-    const int width = image.cols, height = image.rows;
-    const int margin = std::max(16, height / 32);
-    const int step = std::max(1, height / density);
-    std::vector<double> row(width);
-    for (int y = margin; y < height - margin; y += step) {
-        const float* source = smooth.ptr<float>(y);
-        for (int x = 0; x < width; ++x) row[x] = source[view < 2 ? width - 1 - x : x];
-        const double bg = quantile(row, .1), signal = quantile(row, .85);
-        if (signal - bg < 5.) continue;
-        const double coarseThreshold = bg + .4 * (signal - bg);
-        int run = 0, coarse = -1;
-        for (int x = 0; x < width; ++x) {
-            run = row[x] > coarseThreshold ? run + 1 : 0;
-            if (run == 15) { coarse = x - 14; break; }
-        }
-        if (coarse < 130 || coarse >= width - 130) continue;
-        std::vector<double> exterior(row.begin() + coarse - 120, row.begin() + coarse - 60);
-        std::vector<double> interior(row.begin() + coarse + 30, row.begin() + coarse + 100);
-        const double b = quantile(exterior, .5), s = quantile(interior, .5);
-        if (s - b < 5.) continue;
-        std::vector<double> noise = exterior;
-        for (double& value : noise) value = std::abs(value - b);
-        const double sigma = 1.4826 * quantile(noise, .5);
-        const double threshold = b + .15 * (s - b);
-        // Low-side localization must be distinguishable from exterior noise.
-        if (threshold - b < 3. * sigma || s >= 254.) continue;
-        for (int x = coarse - 100; x < coarse + 30; ++x) {
-            if (row[x] <= threshold && row[x + 1] > threshold) {
-                const double subpixel = x + (threshold - row[x]) / (row[x + 1] - row[x]);
-                points.emplace_back(view < 2 ? width - 1 - subpixel : subpixel, y);
-                break;
-            }
+    cv::GaussianBlur(smooth, smooth, cv::Size(), 2.0);
+
+    const int width = smooth.cols;
+    const int height = smooth.rows;
+
+    // 自动采样图像左右边缘区域灰度，自适应探测黑场位于左侧还是右侧
+    const int check_margin = std::max(16, height / 32);
+    const int check_cols = std::min(64, width / 8);
+    std::vector<double> left_samples;
+    std::vector<double> right_samples;
+    left_samples.reserve(static_cast<size_t>((height - 2 * check_margin) / 8 * check_cols));
+    right_samples.reserve(static_cast<size_t>((height - 2 * check_margin) / 8 * check_cols));
+
+    for (int y = check_margin; y < height - check_margin; y += 8) {
+        const float* ptr = smooth.ptr<float>(y);
+        for (int x = 0; x < check_cols; ++x) {
+            left_samples.push_back(ptr[x]);
+            right_samples.push_back(ptr[width - 1 - x]);
         }
     }
-    return filter ? filterEdge(points, height) : points.size() >= 30;
+
+    const double left_median = quantile(left_samples, 0.50);
+    const double right_median = quantile(right_samples, 0.50);
+
+    // 默认或优先建议方向：若左侧明显较暗，则黑场在左侧（scan_from_right = false）；
+    // 若右侧明显较暗，则黑场在右侧（scan_from_right = true）；
+    // 若两侧差异不显著，则参考原入参 view < 2 作为初选建议
+    bool preferred_scan_from_right = (view < 2);
+    if (std::abs(right_median - left_median) >= 5.0) {
+        preferred_scan_from_right = (right_median < left_median);
+    }
+
+    // 1. 首选自适应方向尝试提取
+    Points cand_pts;
+    bool success = extractEdgeDirectional(smooth, preferred_scan_from_right, filter, density, cand_pts);
+
+    // 2. 自适应回退机制：若首选方向提取失败，自动切换为反向扫描重试，彻底免疫相机镜像
+    if (!success) {
+        Points fallback_pts;
+        bool fallback_success = extractEdgeDirectional(smooth, !preferred_scan_from_right, filter, density, fallback_pts);
+        if (fallback_success) {
+            points = std::move(fallback_pts);
+            return true;
+        }
+        return false;
+    }
+
+    points = std::move(cand_pts);
+    return true;
 }
 
 template<size_t N>
@@ -220,7 +320,9 @@ extern "C" WAFER_API int Wafer_FindFourViewEdgeCircle(
             mse += sum / (4. * group.size());
         }
         const double rms = std::sqrt(mse) * 1000.;
-        if (!std::isfinite(rms) || rms > 10. * pixel_size_um) return WAFER_ERR_FITTING_FAILED;
+        if (!std::isfinite(rms) || rms > 100. * pixel_size_um) {
+            return WAFER_ERR_FITTING_FAILED;
+        }
         *result = {circle[0], circle[1], circle[2], rms, maximum * 1000.};
         return WAFER_SUCCESS;
     } catch (const cv::Exception&) {
@@ -295,7 +397,9 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
             mse += sum / (8. * group.size());
         }
         const double rms = std::sqrt(mse) * 1000.;
-        if (!std::isfinite(rms) || rms > 10. * pixel_size_um) return WAFER_ERR_FITTING_FAILED;
+        if (!std::isfinite(rms) || rms > 100. * pixel_size_um) {
+            return WAFER_ERR_FITTING_FAILED;
+        }
         const double angle = right < 0. ? nan : notchAngle(raw, stage_xy_mm + 14, width, height, scale, circle);
         *result = {circle[0], circle[1], circle[2], rms, maximum * 1000., angle};
         return WAFER_SUCCESS;
