@@ -240,16 +240,16 @@ bool fitCircle(const std::array<Points, N>& groups, cv::Vec3d& circle) {
         std::isfinite(circle[2]) && circle[2] > 0.;
 }
 
-cv::Point2d toWorld(const cv::Point2d& p, const double* stage, int width, int height, double scale) {
-    return {stage[0] + (p.x - width * .5) * scale,
-            stage[1] - (p.y - height * .5) * scale};
+cv::Point2d toWorld(const cv::Point2d& p, const double* stage, int width, int height, double scale, double sign_x = 1.0, double sign_y = 1.0) {
+    return {stage[0] + sign_x * (p.x - width * .5) * scale,
+            stage[1] - sign_y * (p.y - height * .5) * scale};
 }
 
 double notchAngle(const Points& edge, const double* stage, int width, int height,
-                  double scale, const cv::Vec3d& circle) {
+                  double scale, const cv::Vec3d& circle, double sign_x = 1.0, double sign_y = 1.0) {
     std::vector<double> angles, depths, midpoints;
     for (const auto& p : edge) {
-        const auto q = toWorld(p, stage, width, height, scale);
+        const auto q = toWorld(p, stage, width, height, scale, sign_x, sign_y);
         angles.push_back(std::atan2(q.x - circle[0], circle[1] - q.y) * 180. / CV_PI);
         depths.push_back(circle[2] - std::hypot(q.x - circle[0], q.y - circle[1]));
     }
@@ -261,7 +261,7 @@ double notchAngle(const Points& edge, const double* stage, int width, int height
             if ((depths[j] <= level && depths[j+1] > level) ||
                 (depths[j] > level && depths[j+1] <= level)) {
                 // Do not bridge missing edge detections across a reflection or particle.
-                if (edge[j+1].x - edge[j].x > 8. * std::max(1, width / 1024)) {
+                if (std::abs(edge[j+1].x - edge[j].x) > 8. * std::max(1, width / 1024)) {
                     crossings.push_back(std::numeric_limits<double>::quiet_NaN());
                     continue;
                 }
@@ -269,8 +269,9 @@ double notchAngle(const Points& edge, const double* stage, int width, int height
                     (depths[j+1] - depths[j]) * (angles[j+1] - angles[j]));
             }
         }
-        if (crossings.size() == 2 && std::isfinite(crossings[0]) && std::isfinite(crossings[1]))
+        if (crossings.size() == 2 && std::isfinite(crossings[0]) && std::isfinite(crossings[1])) {
             midpoints.push_back((crossings[0] + crossings[1]) * .5);
+        }
     }
     if (midpoints.size() < 3) return std::numeric_limits<double>::quiet_NaN();
     std::sort(midpoints.begin(), midpoints.end());
@@ -300,12 +301,43 @@ extern "C" WAFER_API int Wafer_FindFourViewEdgeCircle(
     try {
         std::array<Points, 4> groups;
         const double scale = pixel_size_um / 1000.;
+
+        // 自适应判断四视野相机安装镜像方向
+        // View 0 采图位于第一象限 (+X, +Y)，晶圆内侧在 (-X, -Y) 侧
+        // 若图像左侧比右侧亮，则向左为晶圆内侧 (sign_x = 1.0)；反之为镜像倒装 (sign_x = -1.0)
+        double sign_x = 1.0;
+        double sign_y = 1.0;
+        {
+            cv::Mat view0(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[0]));
+            const int check_margin = std::max(16, height / 32);
+            const int check_cols = std::min(64, width / 8);
+            std::vector<double> left_s, right_s, top_s, bottom_s;
+            for (int y = check_margin; y < height - check_margin; y += 8) {
+                const uint8_t* ptr = view0.ptr<uint8_t>(y);
+                for (int x = 0; x < check_cols; ++x) {
+                    left_s.push_back(ptr[x]);
+                    right_s.push_back(ptr[width - 1 - x]);
+                }
+            }
+            if (quantile(right_s, 0.5) > quantile(left_s, 0.5) + 5.0) {
+                sign_x = -1.0;
+            }
+            for (int x = check_margin; x < width - check_margin; x += 8) {
+                for (int y = 0; y < check_cols; ++y) {
+                    top_s.push_back(view0.at<uint8_t>(y, x));
+                    bottom_s.push_back(view0.at<uint8_t>(height - 1 - y, x));
+                }
+            }
+            if (quantile(top_s, 0.5) > quantile(bottom_s, 0.5) + 5.0) {
+                sign_y = -1.0;
+            }
+        }
+
         for (int i = 0; i < 4; ++i) {
             cv::Mat input(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i]));
             if (!detectEdge(input, i, groups[i])) return WAFER_ERR_FEATURE_NOT_FOUND;
             for (auto& p : groups[i]) {
-                p.x = stage_xy_mm[2*i] + (p.x - width * .5) * scale;
-                p.y = stage_xy_mm[2*i+1] - (p.y - height * .5) * scale;
+                p = toWorld(p, stage_xy_mm + 2*i, width, height, scale, sign_x, sign_y);
             }
         }
         cv::Vec3d circle;
@@ -351,6 +383,48 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
         return WAFER_ERR_INVALID_PARAM;
     try {
         const double scale = pixel_size_um / 1000.;
+
+        // 自适应判断八视野相机在 X / Y 轴的安装镜像方向
+        // View 4 为 +X 视野：晶圆位于内侧 (-X 侧)
+        // 正常安装下：左侧为晶圆亮区，右侧为黑场 (sign_x = 1.0)
+        // 倒装/镜像下：右侧为晶圆亮区，左侧为黑场 (sign_x = -1.0)
+        double sign_x = 1.0;
+        {
+            cv::Mat view4(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[4]));
+            const int check_margin = std::max(16, height / 32);
+            const int check_cols = std::min(64, width / 8);
+            std::vector<double> left_s, right_s;
+            for (int y = check_margin; y < height - check_margin; y += 8) {
+                const uint8_t* ptr = view4.ptr<uint8_t>(y);
+                for (int x = 0; x < check_cols; ++x) {
+                    left_s.push_back(ptr[x]);
+                    right_s.push_back(ptr[width - 1 - x]);
+                }
+            }
+            if (quantile(right_s, 0.5) > quantile(left_s, 0.5) + 5.0) {
+                sign_x = -1.0;
+            }
+        }
+        // View 7 为 -Y 视野：晶圆位于内侧 (+Y 侧)
+        // 正常安装下：上方为晶圆亮区，下方为黑场 (sign_y = 1.0)
+        // 倒装/镜像下：下方为晶圆亮区，上方为黑场 (sign_y = -1.0)
+        double sign_y = 1.0;
+        {
+            cv::Mat view7(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[7]));
+            const int check_margin = std::max(16, width / 32);
+            const int check_rows = std::min(64, height / 8);
+            std::vector<double> top_s, bottom_s;
+            for (int x = check_margin; x < width - check_margin; x += 8) {
+                for (int y = 0; y < check_rows; ++y) {
+                    top_s.push_back(view7.at<uint8_t>(y, x));
+                    bottom_s.push_back(view7.at<uint8_t>(height - 1 - y, x));
+                }
+            }
+            if (quantile(bottom_s, 0.5) > quantile(top_s, 0.5) + 5.0) {
+                sign_y = -1.0;
+            }
+        }
+
         std::array<Points, 7> seedGroups;
         for (int i = 0; i < 7; ++i) {
             cv::Mat input(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i]));
@@ -361,7 +435,7 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
             if (!detectEdge(scan, direction, seedGroups[i])) return WAFER_ERR_FEATURE_NOT_FOUND;
             for (auto& p : seedGroups[i]) {
                 if (i == 6) std::swap(p.x, p.y);
-                p = toWorld(p, stage_xy_mm + 2*i, width, height, scale);
+                p = toWorld(p, stage_xy_mm + 2*i, width, height, scale, sign_x, sign_y);
             }
         }
         cv::Vec3d circle;
@@ -373,7 +447,7 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
         double left = width, right = -1.;
         for (auto& p : raw) {
             std::swap(p.x, p.y);
-            const auto q = toWorld(p, stage_xy_mm + 14, width, height, scale);
+            const auto q = toWorld(p, stage_xy_mm + 14, width, height, scale, sign_x, sign_y);
             if (circle[2] - std::hypot(q.x - circle[0], q.y - circle[1]) > std::max(.1, 10. * scale)) {
                 left = std::min(left, p.x); right = std::max(right, p.x);
             }
@@ -385,7 +459,7 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
         std::array<Points, 8> groups;
         for (int i = 0; i < 7; ++i) groups[i] = std::move(seedGroups[i]);
         for (const auto& p : normal)
-            groups[7].push_back(toWorld({p.y, p.x}, stage_xy_mm + 14, width, height, scale));
+            groups[7].push_back(toWorld({p.y, p.x}, stage_xy_mm + 14, width, height, scale, sign_x, sign_y));
         if (!fitCircle(groups, circle)) return WAFER_ERR_FITTING_FAILED;
         double mse = 0., maximum = 0.;
         for (const auto& group : groups) {
@@ -400,7 +474,7 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
         if (!std::isfinite(rms) || rms > 100. * pixel_size_um) {
             return WAFER_ERR_FITTING_FAILED;
         }
-        const double angle = right < 0. ? nan : notchAngle(raw, stage_xy_mm + 14, width, height, scale, circle);
+        const double angle = right < 0. ? nan : notchAngle(raw, stage_xy_mm + 14, width, height, scale, circle, sign_x, sign_y);
         *result = {circle[0], circle[1], circle[2], rms, maximum * 1000., angle};
         return WAFER_SUCCESS;
     } catch (...) {

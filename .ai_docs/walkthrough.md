@@ -225,4 +225,39 @@
 - **四视野与八视野单元测试套件**：全部通过 (`Ran 4 tests ... OK`, `Ran 3 tests ... OK`)。
 - **最新动态库**：已同步更新至 `WaferCalibSDK/build/Release` 与上位机 `WaferCalibTester` 的 Release/Debug 目录。
 
+---
+
+## 4. Notch 缺口角度计算原理与几何特征解析
+
+### 4.1 几何特征与数学模型
+1. **初圆基准拟合**：
+   - 算法首先使用前 7 个正常晶圆外缘视野（不含 Notch）拟合出初始参考圆 $C_0(x_0, y_0, R_0)$。
+2. **径向凹陷深度（Radial Depth Feature）**：
+   - 在 View 7（机台正南视野），将亚像素边缘点 $P_i(u_i, v_i)$ 映射至机台坐标系 $Q_i(X_i, Y_i)$；
+   - 计算各点到初圆圆心的径向距离 $r_i = \|Q_i - C_0\|$ 以及凹陷深度：
+     $$\text{depth}_i = R_0 - r_i$$
+   - 正常光滑晶圆外缘 $\text{depth}_i \approx 0$；Notch 缺口区域由于向晶圆内部凹陷，$\text{depth}_i$ 呈现典型 “V” 型深入，最深处达 $1.0\sim 1.2\text{ mm}$。
+   - 当 $\text{depth}_i > 0.1\text{ mm}$ 时，自动捕获 Notch 左右边界范围 $[u_{\text{left}}, u_{\text{right}}]$，将缺口凹陷点从终圆拟合中安全剔除，避免污染晶圆圆心拟合。
+
+3. **8 层等深截面扫描（Iso-depth Slicing）与双侧壁亚像素交点**：
+   - 在深度 $0.3\text{ mm} \sim 1.0\text{ mm}$ 范围内，以 $0.1\text{ mm}$ 为步长设置 8 层等深切割线（第 3 层至第 10 层：$0.3, 0.4, \dots, 1.0\text{ mm}$）；
+   - 在每一层截面深度 $h$ 上，对 Notch 左、右两侧壁相邻采样点执行亚像素线性插值，解算出左侧壁交点角 $\theta_{\text{left}}(h)$ 与右侧壁交点角 $\theta_{\text{right}}(h)$；
+   - 计算各层的对称中心角（对称轴方向）：
+     $$\theta_{\text{mid}}(h) = \frac{\theta_{\text{left}}(h) + \theta_{\text{right}}(h)}{2}$$
+
+4. **稳健中位数滤波（Median Filtering）**：
+   - 剔除因单点噪点、局部倒角磨损引起的误差，对 8 个截面中点角取中位数，得到最终 Notch 绝对物理朝向角：
+     $$\theta_{\text{notch}} = \text{median}\left(\{\theta_{\text{mid}}(h)\}\right)$$
+   - 该角度以机台圆心为原点，相对机台正南方向（$-Y$ 轴），向 $+X$（逆时针）旋转为正。
+
+### 4.2 可视化原理大图
+已生成全流程高分辨率诊断大图：
+- 保存路径：[`C:\Users\HYC\Desktop\EdgeImage\notch_angle_analysis.png`](file:///C:/Users/HYC/Desktop/EdgeImage/notch_angle_analysis.png)
+- 包含 4 大诊断看板：
+  1. **图1**：机台物理空间与八视野采图拓扑分布；
+  2. **图2**：View 7 亚像素边缘提取与径向凹陷深度 profile；
+  3. **图3**：Notch 缺口 8 层等深截面扫描与双侧壁交点解算；
+  4. **图4**：各截面中点角度稳定性分布（极差 $<0.0013^\circ$）与最终中位数判定线。
+
+
 
