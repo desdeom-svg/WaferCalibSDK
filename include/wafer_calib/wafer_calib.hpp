@@ -6,6 +6,7 @@
 #include "wafer_calib/modules/axis_pixel_calibration.hpp"
 #include "wafer_calib/modules/circle_center_offset.hpp"
 #include "wafer_calib/modules/distortion_correction.hpp"
+#include "wafer_calib/modules/flat_field.hpp"
 #include "wafer_calib/modules/line_angle.hpp"
 #include "wafer_calib/modules/mark_center.hpp"
 #include "wafer_calib/modules/noise_reduction.hpp"

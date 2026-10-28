@@ -607,6 +607,92 @@ WAFER_API int Wafer_TransformAxisToPixel(
     double* out_v
 );
 
+/**
+ * @brief 平场标定质量评估指标结构体
+ */
+typedef struct WaferFlatFieldMetrics {
+    /** @brief 校正前全图非均匀度 Non-Uniformity (%) */
+    double raw_nu;
+    /** @brief 校正后全图非均匀度预测值 (%) */
+    double corrected_nu;
+    /** @brief 镜头角隅光学渐晕衰减率 (%)，即 1 - 四角均值 / 中心均值 */
+    double vignetting;
+} WaferFlatFieldMetrics;
+
+/**
+ * @brief 平场标定接口：输入多帧平场 Mono8 图像指针与暗场模板指针，计算全画幅 32 位浮点增益矩阵。
+ * @param flat_buffers 包含 flat_count 个平场图像指针的数组；每帧为 Mono8，长度至少为 width * height 字节。
+ * @param flat_count 输入平场图像帧数 (N >= 1)。
+ * @param dark_template 暗场底噪模板指针 (Mono8，长度 width * height 字节)；传 NULL 表示不扣暗场。
+ * @param width 图像宽度，单位：像素。
+ * @param height 图像高度，单位：像素。
+ * @param max_gain_clamp 增益截断上限 (防止边缘死点噪点爆炸，传 <=0.0 时默认取 3.5)。
+ * @param out_gain_map 输出逐像素 32 位浮点增益矩阵指针 (由调用方预分配 width * height * sizeof(float) 字节)。
+ * @param save_template_path 可选保存路径 (如 "D:/recipes/gain.tiff" 或 ".bin")；传 NULL 或空串时不保存。
+ * @param out_metrics 可选输出质量指标；传 NULL 表示不获取。
+ * @return WAFER_SUCCESS (0) 或 WAFER_ERR_* 错误码。
+ * @note 内部固定策略：均值融合，自动取图像中心 1/4 区域 (width/2 * height/2) 净均值作为归一化基准。
+ */
+WAFER_API int Wafer_CalibrateFlatField(
+    const unsigned char** flat_buffers,
+    int flat_count,
+    const unsigned char* dark_template,
+    int width,
+    int height,
+    float max_gain_clamp,
+    float* out_gain_map,
+    const char* save_template_path,
+    WaferFlatFieldMetrics* out_metrics
+);
+
+/**
+ * @brief 实时平场校正接口：对单张 Mono8 图像执行暗场扣除与 32 位浮点增益矩阵映射。
+ * @param input_image 输入原始待校正图像指针 (Mono8，长度 width * height 字节)。
+ * @param output_image 输出校正后图像指针 (Mono8，由调用方预分配 width * height 字节，支持与 input_image 相同以原地校正)。
+ * @param width 图像宽度，单位：像素。
+ * @param height 图像高度，单位：像素。
+ * @param dark_template 暗场底噪模板指针 (Mono8，长度 width * height 字节)；传 NULL 表示不扣暗场。
+ * @param gain_map 32 位浮点平场增益矩阵指针 (长度 width * height 个 float)。
+ * @return WAFER_SUCCESS (0) 或 WAFER_ERR_* 错误码。
+ * @note 内部采用多核 OpenMP / SIMD 向量化加速，4096×4096 耗时稳定在 2.5ms 左右。
+ */
+WAFER_API int Wafer_ApplyFlatFieldCorrection(
+    const unsigned char* input_image,
+    unsigned char* output_image,
+    int width,
+    int height,
+    const unsigned char* dark_template,
+    const float* gain_map
+);
+
+/**
+ * @brief 暗场-平场-LUT 一体化极速预处理流水线接口。
+ * @details 在单次内存遍历循环中同时完成：
+ *          1. 暗场底噪扣除 (net = in - dark)
+ *          2. 平场增益校正 (val = net * gain)
+ *          3. 灰度截断与四舍五入 (0~255)
+ *          4. 反射率线性化 LUT 查表映射 (out = lut[val])
+ *          单次访存直出最终图像，消除多步调用的中间缓冲区与 CPU 缓存频繁换出开销。
+ * @param input_image 输入原始相机待校正图像指针 (Mono8，长度 width * height 字节)。
+ * @param output_image 输出预处理完成图像指针 (Mono8，由调用方预分配 width * height 字节，支持与 input_image 相同以原地就地处理)。
+ * @param width 图像宽度，单位：像素。
+ * @param height 图像高度，单位：像素。
+ * @param dark_template 暗场底噪模板指针 (Mono8，长度 width * height 字节)；传 NULL 表示不扣除暗场。
+ * @param gain_map 32 位浮点平场增益矩阵指针 (长度 width * height 个 float)。
+ * @param lut_256 256 字节灰度映射 LUT 表指针 (out = lut[val])；传 NULL 表示跳过 LUT 映射直接输出平场校正灰度。
+ * @return WAFER_SUCCESS (0) 或 WAFER_ERR_* 错误码。
+ * @note 内部采用多核 OpenMP / 向量化并行，支持原地就地操作。
+ */
+WAFER_API int Wafer_ApplyPreprocessPipeline(
+    const unsigned char* input_image,
+    unsigned char* output_image,
+    int width,
+    int height,
+    const unsigned char* dark_template,
+    const float* gain_map,
+    const unsigned char* lut_256
+);
+
 #ifdef __cplusplus
 }
 #endif

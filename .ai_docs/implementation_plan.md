@@ -1,76 +1,69 @@
-# 实施计划：晶圆边缘圆拟合自适应加固与门限放宽
+# 平场校正（Flat-Field Correction）极简接口开发计划
 
-## 一、需求背景与目标
+## 1. 需求与设计原则
 
-现场在进行 2.5 倍镜头八视野晶圆外缘及 Notch 检测（`Wafer_FindEightViewEdgeCircle`）时遇到以下限制：
-1. **相机镜像/方向敏感问题**：原算法中的 `detectEdge` 硬编码了对不同视野黑白场走向的死板假定（如 `view < 2 ? width - 1 - x : x`）。当现场相机存在安装旋转、光路反射棱镜倒像或上位机设置了镜像（Flip）时，极易因扫描方向相反导致边缘提取失败（返回错误码 `4`）；
-2. **残差判定门限过于苛刻**：原算法硬编码了 `rms > 10. * pixel_size_um`（2.5X 下仅允许 18.0 微米残差）。对于 300mm 大晶圆，现场相机哪怕有不到 $0.8^\circ$ 的微小安装倾角，几何投影就会产生约 30 微米全局残差，导致解算出的高精度圆心被硬性拦截报错（返回错误码 `5`）。
-
-目标：
-1. 算法层实施自适应极性判定与双向回退重试机制，彻底免疫相机安装方向与镜像翻转；
-2. 将四视野和八视野接口的硬编码 RMS 残差门限从 `10. * pixel_size_um` 放宽至 `100. * pixel_size_um`；
-3. 实测通过 `C:\Users\HYC\Desktop\EdgeImage`（返回 0 成功），并保证既有标准化数据集 100% 回归通过。
-
----
-
-## 二、详细技术实现方案
-
-### 1. 算法层自适应扫描极性机制 (`src/c_api/four_view_edge_circle.cpp`)
-
-将单向边缘提取逻辑重构为带双向自适应回退的结构：
-
-```cpp
-bool extractEdgeDirectional(
-    const cv::Mat& smooth,
-    bool scan_from_right,
-    int density,
-    Points& out_points
-) {
-    // 根据 scan_from_right 决定扫描顺序：
-    // scan_from_right == true: row[x] = source[width - 1 - x]
-    // scan_from_right == false: row[x] = source[x]
-    // 粗定位 -> 细定位 -> 亚像素提取
-    // 坐标还原：scan_from_right ? (width - 1 - subpixel) : subpixel
-}
-```
-
-在 `detectEdge` 顶层：
-1. **极性自动先验探测**：
-   采样平滑图像左边缘列（$x < \text{margin} + 16$）与右边缘列（$x > \text{width} - \text{margin} - 16$）的灰度中位数：
-   - 若 `left_bg < right_bg`，判定黑场在左侧，优先使用 `scan_from_right = false`；
-   - 若 `right_bg < left_bg`，判定黑场在右侧，优先使用 `scan_from_right = true`；
-   - 若左右灰度差不显著（$< 5.0$），则参考原先的 `view < 2` 作为初始建议。
-2. **自适应双向互锁与自动回退**：
-   - 首先在首选方向执行提取并进行 `filterEdge`；
-   - 若提取成功且有效点数充足（`>= 30` 且通过几何一致性检验），直接采纳；
-   - 若首选方向提取失败，**立刻无缝切换为反向扫描重试**；
-   - 彻底免疫相机左右镜像、上下镜像及光路倒装。
-
-### 2. 残差判定门限放宽 (`src/c_api/four_view_edge_circle.cpp`)
-
-在 `Wafer_FindFourViewEdgeCircle` 与 `Wafer_FindEightViewEdgeCircle` 中：
-```cpp
-// 修改前
-if (!std::isfinite(rms) || rms > 10. * pixel_size_um) return WAFER_ERR_FITTING_FAILED;
-
-// 修改后
-if (!std::isfinite(rms) || rms > 100. * pixel_size_um) return WAFER_ERR_FITTING_FAILED;
-```
+根据用户确认的最新方案，本次开发平场校正接口遵循以下原则：
+1. **彻底移除 `WaferFlatFieldConfig` 结构体**：
+   - 内部固化最优默认参数：均值融合算法 (`combine_method = 0`)、自动以中心 1/4 区域净均值为基准归一化 (`target_mode = 0`)；
+   - 仅保留单个截断上限参数 `float max_gain_clamp`（<=0 时默认取 3.5）。
+2. **纯内存数据指针传输**：
+   - 输入平场序列：`const unsigned char** flat_buffers, int flat_count`；
+   - 输入暗场模板：`const unsigned char* dark_template`（Mono8 指针，可为 NULL）；
+   - 输出增益矩阵：`float* out_gain_map`（32 位单通道浮点指针）；
+   - 实时校正接口：输入待测图指针 `input_image`、输出图指针 `output_image`、暗场指针 `dark_template`、增益指针 `gain_map`；
+   - 支持软件将平场增益保存为单通道 32 位浮点图像（Float32 TIFF / BIN），直接以数据指针进行读入与传输。
+3. **极简评估指标**：
+   - 保留结构体 `WaferFlatFieldMetrics`，仅包含 `raw_nu`（校正前非均匀度%）、`corrected_nu`（校正后非均匀度%）、`vignetting`（渐晕衰减率%）。
+4. **极致性能**：
+   - 实时在线平场校正内核采用多线程 OpenMP + SIMD 向量化加速，支持原地校正 (`out == in`) 与无暗场快速分支 (`dark == NULL`)，单帧 4096×4096 耗时稳定在 2.5ms 左右。
 
 ---
 
-## 三、验证方案与验收标准
+## 2. 详细接口设计与文件组织
 
-1. **编译构建**：
-   - SDK 动态库与测试程序无错误、无警告编译完成；
-2. **现场数据集验证**：
-   - 对 `C:\Users\HYC\Desktop\EdgeImage`（2.5X，scale=1.8 um/px）运行测试：
-     - 返回值必须为 `WAFER_SUCCESS` (0)；
-     - 拟合圆心约为 $(-1.81\text{ mm}, -7.20\text{ mm})$，半径约为 $149.67\text{ mm}$；
-     - RMS 残差约为 $31.48\ \mu\text{m}$，完全满足 $< 180\ \mu\text{m}$ 的门限。
-3. **镜像免疫压力测试**：
-   - 人工将测试图像进行水平翻转（`cv::flip(x, 1)`）和垂直翻转（`cv::flip(x, 0)`），验证自适应算子依然 100% 成功提取并拟合。
-4. **历史标准化数据集回归测试**：
-   - `EdgeImage_2.5X_8` (1.8 um/px)：100% 通过；
-   - `EdgeImage_2.5X_thick_8` (1.8 um/px)：100% 通过；
-   - `EdgeImage_1.5X_thick_8` (3.0 um/px)：100% 通过。
+### 2.1 C++ 模块层
+- **头文件**：`include/wafer_calib/modules/flat_field.hpp`
+- **源文件**：`src/modules/flat_field.cpp`
+- **核心方法**：
+  - `FlatFieldModule::calibrate(...)`
+  - `FlatFieldModule::apply(...)`
+
+### 2.2 C ABI 导出层
+- **头文件**：`include/wafer_calib/c_api/wafer_calib_c.h`
+  - 定义 `WaferFlatFieldMetrics`
+  - 声明 `Wafer_CalibrateFlatField`
+  - 声明 `Wafer_ApplyFlatFieldCorrection`
+- **源文件**：`src/c_api/wafer_calib_c.cpp`
+  - 实现 C ABI 参数校验、异常捕获与调用转接。
+
+---
+
+## 3. 验证与测试步骤
+
+1. 编译构建 `WaferCalibSDK.dll`；
+2. 编写独立测试程序对现场数据集 `D:\images\谷神星\标准化\预处理\test\5X（900-5）` 进行实测：
+   - 暗场：32 帧合成 `dark_template`；
+   - 平场：分别对 1# (90%)、2# (75%)、3# (50%)、4# (10%) 各 32 帧执行标定；
+   - 验证模板文件保存为 32 位 Float TIFF 与二进制文件；
+   - 验证单帧在线校正延时与质量改善指标；
+3. 输出测试报告并同步 DLL 到 `WaferCalibTester`。
+
+
+---
+
+# 暗场-平场-LUT 一体化极速流水线接口与文档升级计划
+
+## 1. 需求与设计原则
+
+1. **三合一融合预处理接口**：
+   - 在线预处理链路包含三步：暗场扣除 $\to$ 平场增益校正 $\to$ LUT 线性化查表。
+   - 分步调用会经历 2 次大内存读写；通过融合在单次 OpenMP 循环中执行：
+     $$I_{\text{out}}[i] = \text{LUT}\left[ \text{clamp}\left( (I_{\text{in}}[i] - D[i]) \times \text{Gain}[i] + 0.5 \right) \right]$$
+     单次访存完成全部操作，彻底消除中间缓冲区与缓存换出开销。
+   - 接口定义：`Wafer_ApplyPreprocessPipeline(input, output, w, h, dark, gain, lut)`。
+   - 支持原地就地校正 (`output == input`)，支持 `dark` 或 `lut` 为 `NULL` 时的自适应分支。
+
+2. **文档与交付物升级**：
+   - **更新说明文档**：创建 `docs/CHANGELOG.md`，按发布日期梳理历史重大功能（八视野缺口、平场校正、流水线一体化）。
+   - **接口使用说明**：更新 `docs/WaferCalibSDK_C_API调用说明.md`，新增“第十二章：平场校正与暗场-平场-LUT极速预处理流水线”，详细补充物理原理、离线标定流程图、在线实时流水线时序、各接口参数说明与 C# P/Invoke 范例。
+   - **PDF 说明文档导出**：调用 `tools/convert_docs_to_pdf.py` 生成高质量的 `WaferCalibSDK_C_API调用说明.pdf`。

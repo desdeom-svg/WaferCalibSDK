@@ -1,20 +1,21 @@
-# 任务清单：晶圆边缘圆拟合自适应加固与 Notch 缺口角度解析
+# 任务清单：平场校正与暗场-平场-LUT一体化极速流水线开发
 
-- [x] 1. 制定实施方案并编写 implementation_plan.md (已完成)
-- [x] 2. 重构 `detectEdge` 边缘提取算子： (已完成)
-    - 引入基于图像边界灰度自适应判定扫描极性机制 (黑场->亮场)
-    - 增加双向自适应回退重试机制，彻底免疫相机左右/上下镜像及倒装
-- [x] 3. 放宽 RMS 拟合残差判定门限： (已完成)
-    - 将 `Wafer_FindFourViewEdgeCircle` 的 `10. * pixel_size_um` 放宽至 `100. * pixel_size_um`
-    - 将 `Wafer_FindEightViewEdgeCircle` 的 `10. * pixel_size_um` 放宽至 `100. * pixel_size_um`
-- [x] 4. 自适应加固坐标映射（彻底免疫相机镜像倒装）： (已完成)
-    - 自动依据晶圆亮场朝向检测 `sign_x` 与 `sign_y`
-    - 保证世界坐标系与凹陷深度 `depth = R - dist` 无论在相机正装还是 180° 镜像倒装下均正确为正
-    - 确保 View 7 的 Notch 凹陷区域被精准剔除出大圆拟合，使拟合 RMS 残差从 187.5um 降至 31.45um
-- [x] 5. 编译构建 SDK DLL 并执行单元测试与回归测试： (已完成)
-    - 验证 `C:\Users\HYC\Desktop\EdgeImage` 稳定返回 `code=0`, `Center=(-1.8112, -7.2065)`, `Radius=149.6722`, `RMS=31.45um`, `Notch=+0.0827°`
-    - 验证标准化数据集 `EdgeImage_2.5X_8`、`EdgeImage_2.5X_thick_8`、`EdgeImage_1.5X_thick_8` 全部返回 `code=0`
-    - C++ 编译 0 警告 0 错误，Python 7/7 单元测试全部通过
-- [x] 6. 同步最新 DLL 到上位机 WaferCalibTester (Release / Debug) (已完成)
-- [x] 7. 深入剖析 Notch 缺口特征与角度计算逻辑，并绘制高分辨率原理图： (已完成)
-    - 生成 `C:\Users\HYC\Desktop\EdgeImage\notch_angle_analysis.png`
+- [x] 1. 平场校正极简接口开发与全量实测验证 (4 组标片 + 暗场)
+- [x] 2. 新增 `Wafer_ApplyPreprocessPipeline` 三合一融合预处理接口：
+    - 在 `include/wafer_calib/modules/flat_field.hpp` 中声明 `applyPipeline`
+    - 在 `src/modules/flat_field.cpp` 中实现单次循环多线程融合计算 (`net = in - dark; val = net * gain; out = lut[val]`)
+    - 在 `include/wafer_calib/c_api/wafer_calib_c.h` 导出 `Wafer_ApplyPreprocessPipeline`
+    - 在 `src/c_api/wafer_calib_c.cpp` 完成 C ABI 参数校验与实现
+- [x] 3. 构建与编译 SDK 动态库：
+    - CMake 编译 `build --config Release`
+    - 同步最新 DLL 至 C# 上位机项目 `WaferCalibTester`
+- [x] 4. 验证测试与性能基准比对：
+    - 验证三合一流水线与两步串行调用的 100% 结果一致性
+    - 测量单帧处理耗时与加速比
+- [x] 5. 编写并更新版本更新日志：
+    - 创建 `docs/CHANGELOG.md` 记录详细更新历史与今日接口升级
+- [x] 6. 更新说明文档与导出 PDF：
+    - 在 `docs/WaferCalibSDK_C_API调用说明.md` 增加第十二章：平场校正与暗场-平场-LUT极速预处理流水线
+    - 编写完整的标定逻辑、调用流程图、参数定义与 C# P/Invoke 范例
+    - 运行 `tools/convert_docs_to_pdf.py` 导出更新后的 PDF 交付文件
+- [x] 7. 输出交付总结报告与文档说明

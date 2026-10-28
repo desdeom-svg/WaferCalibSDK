@@ -991,5 +991,118 @@ int Wafer_TransformAxisToPixel(
     return WAFER_SUCCESS;
 }
 
+WAFER_API int Wafer_CalibrateFlatField(
+    const unsigned char** flat_buffers,
+    int flat_count,
+    const unsigned char* dark_template,
+    int width,
+    int height,
+    float max_gain_clamp,
+    float* out_gain_map,
+    const char* save_template_path,
+    WaferFlatFieldMetrics* out_metrics
+) {
+    if (!flat_buffers || flat_count <= 0 || width <= 0 || height <= 0 || !out_gain_map) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    std::vector<cv::Mat> flat_frames;
+    flat_frames.reserve(flat_count);
+    for (int i = 0; i < flat_count; ++i) {
+        if (!flat_buffers[i]) {
+            return WAFER_ERR_INVALID_PARAM;
+        }
+        flat_frames.emplace_back(height, width, CV_8UC1, const_cast<unsigned char*>(flat_buffers[i]));
+    }
+
+    cv::Mat dark_mat;
+    if (dark_template) {
+        dark_mat = cv::Mat(height, width, CV_8UC1, const_cast<unsigned char*>(dark_template));
+    }
+
+    cv::Mat out_gain_mat(height, width, CV_32FC1, out_gain_map);
+    wafer_calib::FlatFieldMetrics cpp_metrics;
+    std::string save_path = save_template_path ? save_template_path : "";
+
+    wafer_calib::Status status = wafer_calib::FlatFieldModule::calibrate(
+        flat_frames,
+        dark_mat,
+        max_gain_clamp,
+        out_gain_mat,
+        out_metrics ? &cpp_metrics : nullptr,
+        save_path
+    );
+
+    if (status.ok() && out_metrics) {
+        out_metrics->raw_nu = cpp_metrics.raw_nu;
+        out_metrics->corrected_nu = cpp_metrics.corrected_nu;
+        out_metrics->vignetting = cpp_metrics.vignetting;
+    }
+
+    return statusToCErrorCode(status);
+}
+
+WAFER_API int Wafer_ApplyFlatFieldCorrection(
+    const unsigned char* input_image,
+    unsigned char* output_image,
+    int width,
+    int height,
+    const unsigned char* dark_template,
+    const float* gain_map
+) {
+    if (!input_image || !output_image || width <= 0 || height <= 0 || !gain_map) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    cv::Mat in_mat(height, width, CV_8UC1, const_cast<unsigned char*>(input_image));
+    cv::Mat out_mat(height, width, CV_8UC1, output_image);
+    cv::Mat gain_mat(height, width, CV_32FC1, const_cast<float*>(gain_map));
+    cv::Mat dark_mat;
+    if (dark_template) {
+        dark_mat = cv::Mat(height, width, CV_8UC1, const_cast<unsigned char*>(dark_template));
+    }
+
+    wafer_calib::Status status = wafer_calib::FlatFieldModule::apply(
+        in_mat,
+        out_mat,
+        dark_mat,
+        gain_mat
+    );
+
+    return statusToCErrorCode(status);
+}
+
+WAFER_API int Wafer_ApplyPreprocessPipeline(
+    const unsigned char* input_image,
+    unsigned char* output_image,
+    int width,
+    int height,
+    const unsigned char* dark_template,
+    const float* gain_map,
+    const unsigned char* lut_256
+) {
+    if (!input_image || !output_image || width <= 0 || height <= 0 || !gain_map) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    cv::Mat in_mat(height, width, CV_8UC1, const_cast<unsigned char*>(input_image));
+    cv::Mat out_mat(height, width, CV_8UC1, output_image);
+    cv::Mat gain_mat(height, width, CV_32FC1, const_cast<float*>(gain_map));
+    cv::Mat dark_mat;
+    if (dark_template) {
+        dark_mat = cv::Mat(height, width, CV_8UC1, const_cast<unsigned char*>(dark_template));
+    }
+
+    wafer_calib::Status status = wafer_calib::FlatFieldModule::applyPipeline(
+        in_mat,
+        out_mat,
+        dark_mat,
+        gain_mat,
+        lut_256
+    );
+
+    return statusToCErrorCode(status);
+}
+
 } // extern "C"
 
