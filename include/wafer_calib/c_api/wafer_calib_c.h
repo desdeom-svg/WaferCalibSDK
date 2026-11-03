@@ -500,6 +500,46 @@ WAFER_API int Wafer_CalibrateReflectanceLutFromFiles(
 );
 
 /**
+ * @brief 结合 4 组已知反射率标定图 (每组输入 N 张重复拍摄图片) 标定计算 256 元素灰度映射 LUT。
+ * 算法内部将 4 * images_per_group 张图片分为 4 组，每组求平均后再进行直方图波峰拟合。
+ * @param image_buffers 包含 4 * images_per_group 张图像指针的数组；每帧长度为 width * height 字节。
+ *                      排列顺序：前 N 张为 5%, 接下来 N 张为 50%, 接下来 N 张为 75%, 最后 N 张为 90%。
+ * @param images_per_group 每组反射率下的重复拍摄图片张数 N (N >= 1)。
+ * @param width 图像宽度，单位：像素。
+ * @param height 图像高度，单位：像素。
+ * @param config 标定配置参数，传 NULL 时采用默认参数。
+ * @param out_result 输出标定计算结果结构体指针，不能为空。
+ * @param result_bgr 输出高分辨率四合一工业诊断大图缓冲区 (2048 * 1536 * 3 字节)；传 NULL 表示不输出。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CalibrateReflectanceLutMultiFrame(
+    const unsigned char** image_buffers,
+    int images_per_group,
+    int width,
+    int height,
+    const WaferReflectanceLutConfig* config,
+    WaferReflectanceLutResult* out_result,
+    unsigned char* result_bgr
+);
+
+/**
+ * @brief 从文件路径读取 4 组已知反射率标定图 (每组 N 张文件) 进行多帧平均后标定计算 LUT。
+ * @param file_paths 包含 4 * images_per_group 个图像文件路径的数组。
+ * @param images_per_group 每组反射率下的重复拍摄图片张数 N (N >= 1)。
+ * @param config 标定配置参数，传 NULL 时采用默认参数。
+ * @param out_result 输出标定结果结构体指针；传 NULL 时不获取。
+ * @param save_diagnostic_image_path 诊断大图保存路径；传 NULL 或空字符串时不保存。
+ * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
+ */
+WAFER_API int Wafer_CalibrateReflectanceLutFromFilesMultiFrame(
+    const char** file_paths,
+    int images_per_group,
+    const WaferReflectanceLutConfig* config,
+    WaferReflectanceLutResult* out_result,
+    const char* save_diagnostic_image_path
+);
+
+/**
  * @brief 使用 256 元素 LUT 对单张 Mono8 图像进行超高速查表线性化校正 (在线生产每帧耗时约 1~2ms)。
  * @param src_mono8 输入原始 Mono8 图像，长度为 width * height 字节。
  * @param width 图像宽度，单位：像素。

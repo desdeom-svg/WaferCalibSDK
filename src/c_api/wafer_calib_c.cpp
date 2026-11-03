@@ -575,21 +575,23 @@ WAFER_API int Wafer_CalculatePlatformRotationCenterFromFiles(
     return WAFER_SUCCESS;
 }
 
-int Wafer_CalibrateReflectanceLut(
+int Wafer_CalibrateReflectanceLutMultiFrame(
     const unsigned char** image_buffers,
+    int images_per_group,
     int width,
     int height,
     const WaferReflectanceLutConfig* config,
     WaferReflectanceLutResult* out_result,
     unsigned char* result_bgr
 ) {
-    if (!image_buffers || width <= 0 || height <= 0 || !out_result) {
+    if (!image_buffers || images_per_group <= 0 || width <= 0 || height <= 0 || !out_result) {
         return WAFER_ERR_INVALID_PARAM;
     }
 
+    const int total_images = 4 * images_per_group;
     std::vector<cv::Mat> images;
-    images.reserve(4);
-    for (int i = 0; i < 4; ++i) {
+    images.reserve(total_images);
+    for (int i = 0; i < total_images; ++i) {
         if (!image_buffers[i]) {
             return WAFER_ERR_IMAGE_EMPTY;
         }
@@ -613,7 +615,7 @@ int Wafer_CalibrateReflectanceLut(
     cv::Mat diagnostic;
     cv::Mat* diag_ptr = result_bgr ? &diagnostic : nullptr;
 
-    if (!wafer_calib::WaferReflectanceLutCalibrator::Calibrate(images, cpp_cfg, cpp_res, diag_ptr)) {
+    if (!wafer_calib::WaferReflectanceLutCalibrator::CalibrateMultiFrame(images, images_per_group, cpp_cfg, cpp_res, diag_ptr)) {
         return WAFER_ERR_FITTING_FAILED;
     }
 
@@ -641,19 +643,32 @@ int Wafer_CalibrateReflectanceLut(
     return WAFER_SUCCESS;
 }
 
-int Wafer_CalibrateReflectanceLutFromFiles(
+int Wafer_CalibrateReflectanceLut(
+    const unsigned char** image_buffers,
+    int width,
+    int height,
+    const WaferReflectanceLutConfig* config,
+    WaferReflectanceLutResult* out_result,
+    unsigned char* result_bgr
+) {
+    return Wafer_CalibrateReflectanceLutMultiFrame(image_buffers, 1, width, height, config, out_result, result_bgr);
+}
+
+int Wafer_CalibrateReflectanceLutFromFilesMultiFrame(
     const char** file_paths,
+    int images_per_group,
     const WaferReflectanceLutConfig* config,
     WaferReflectanceLutResult* out_result,
     const char* save_diagnostic_image_path
 ) {
-    if (!file_paths) {
+    if (!file_paths || images_per_group <= 0) {
         return WAFER_ERR_INVALID_PARAM;
     }
 
+    const int total_images = 4 * images_per_group;
     std::vector<cv::Mat> images;
-    images.reserve(4);
-    for (int i = 0; i < 4; ++i) {
+    images.reserve(total_images);
+    for (int i = 0; i < total_images; ++i) {
         if (!file_paths[i]) {
             return WAFER_ERR_INVALID_PARAM;
         }
@@ -681,7 +696,7 @@ int Wafer_CalibrateReflectanceLutFromFiles(
     cv::Mat diagnostic;
     cv::Mat* diag_ptr = (save_diagnostic_image_path && save_diagnostic_image_path[0] != '\0') ? &diagnostic : nullptr;
 
-    if (!wafer_calib::WaferReflectanceLutCalibrator::Calibrate(images, cpp_cfg, cpp_res, diag_ptr)) {
+    if (!wafer_calib::WaferReflectanceLutCalibrator::CalibrateMultiFrame(images, images_per_group, cpp_cfg, cpp_res, diag_ptr)) {
         return WAFER_ERR_FITTING_FAILED;
     }
 
@@ -702,6 +717,15 @@ int Wafer_CalibrateReflectanceLutFromFiles(
     }
 
     return WAFER_SUCCESS;
+}
+
+int Wafer_CalibrateReflectanceLutFromFiles(
+    const char** file_paths,
+    const WaferReflectanceLutConfig* config,
+    WaferReflectanceLutResult* out_result,
+    const char* save_diagnostic_image_path
+) {
+    return Wafer_CalibrateReflectanceLutFromFilesMultiFrame(file_paths, 1, config, out_result, save_diagnostic_image_path);
 }
 
 int Wafer_ApplyLutToImage(

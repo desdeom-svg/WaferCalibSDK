@@ -1,21 +1,10 @@
-# 任务清单：平场校正与暗场-平场-LUT一体化极速流水线开发
+# WaferCalibSDK 开发任务清单
 
-- [x] 1. 平场校正极简接口开发与全量实测验证 (4 组标片 + 暗场)
-- [x] 2. 新增 `Wafer_ApplyPreprocessPipeline` 三合一融合预处理接口：
-    - 在 `include/wafer_calib/modules/flat_field.hpp` 中声明 `applyPipeline`
-    - 在 `src/modules/flat_field.cpp` 中实现单次循环多线程融合计算 (`net = in - dark; val = net * gain; out = lut[val]`)
-    - 在 `include/wafer_calib/c_api/wafer_calib_c.h` 导出 `Wafer_ApplyPreprocessPipeline`
-    - 在 `src/c_api/wafer_calib_c.cpp` 完成 C ABI 参数校验与实现
-- [x] 3. 构建与编译 SDK 动态库：
-    - CMake 编译 `build --config Release`
-    - 同步最新 DLL 至 C# 上位机项目 `WaferCalibTester`
-- [x] 4. 验证测试与性能基准比对：
-    - 验证三合一流水线与两步串行调用的 100% 结果一致性
-    - 测量单帧处理耗时与加速比
-- [x] 5. 编写并更新版本更新日志：
-    - 创建 `docs/CHANGELOG.md` 记录详细更新历史与今日接口升级
-- [x] 6. 更新说明文档与导出 PDF：
-    - 在 `docs/WaferCalibSDK_C_API调用说明.md` 增加第十二章：平场校正与暗场-平场-LUT极速预处理流水线
-    - 编写完整的标定逻辑、调用流程图、参数定义与 C# P/Invoke 范例
-    - 运行 `tools/convert_docs_to_pdf.py` 导出更新后的 PDF 交付文件
-- [x] 7. 输出交付总结报告与文档说明
+## 最近完成任务
+- [x] 新增支持每组 N 张图像平均后再进行反射率 LUT 拟合的核心函数与 C ABI 接口
+  - 在 `include/wafer_calib/modules/reflectance_lut.hpp` 声明 `WaferReflectanceLutCalibrator::CalibrateMultiFrame`
+  - 在 `src/modules/reflectance_lut.cpp` 中实现：校验输入尺寸，若 $N > 1$ 利用 `cv::accumulate` 对每组 $N$ 张图像进行 32 位浮点累加均值化，转为 `CV_8UC1` 后复用现有高精度标定流水线；若 $N = 1$ 直接透传
+  - 在 `include/wafer_calib/c_api/wafer_calib_c.h` 增加 `Wafer_CalibrateReflectanceLutMultiFrame` 与 `Wafer_CalibrateReflectanceLutFromFilesMultiFrame`
+  - 在 `src/c_api/wafer_calib_c.cpp` 中实现，原接口内联委托给多帧版本（$N=1$）实现 100% 向后兼容
+  - 导出符号验证：`dumpbin /EXPORTS` 确认导出序号 477 与 478 符号就绪
+  - 动态库已同步更新至 Release 构建并拷贝至 C# 端测试套件

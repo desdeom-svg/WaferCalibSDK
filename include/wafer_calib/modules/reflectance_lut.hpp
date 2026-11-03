@@ -94,6 +94,23 @@ public:
     );
 
     /**
+     * @brief 支持每阶反射率输入多张重复拍摄图片的 LUT 标定函数
+     * @param images 包含 4 * images_per_group 张标定图像的向量，顺序为：第 1 组 N 张(5%), 第 2 组 N 张(50%), 第 3 组 N 张(75%), 第 4 组 N 张(90%)
+     * @param images_per_group 每个反射率百分比包含的图片数量 N (N >= 1)
+     * @param config 标定配置参数
+     * @param out_result 输出标定计算结果
+     * @param out_diagnostic 可选输出的高分辨率工业级四合一诊断大图
+     * @return true 标定成功，false 失败
+     */
+    static bool CalibrateMultiFrame(
+        const std::vector<cv::Mat>& images,
+        int images_per_group,
+        const ReflectanceLutConfig& config,
+        ReflectanceLutResult& out_result,
+        cv::Mat* out_diagnostic = nullptr
+    );
+
+    /**
      * @brief 使用 256 元素 LUT 对单张 Mono8 图像进行高速查表映射
      * @param src 输入原始 Mono8 图像
      * @param dst 输出校正后的 Mono8 图像 (由调用方预分配或函数内自动创建)

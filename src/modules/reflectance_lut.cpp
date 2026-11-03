@@ -329,6 +329,57 @@ bool WaferReflectanceLutCalibrator::Calibrate(
     return true;
 }
 
+bool WaferReflectanceLutCalibrator::CalibrateMultiFrame(
+    const std::vector<cv::Mat>& images,
+    int images_per_group,
+    const ReflectanceLutConfig& config,
+    ReflectanceLutResult& out_result,
+    cv::Mat* out_diagnostic
+) {
+    if (images_per_group < 1) {
+        return false;
+    }
+    const size_t total_expected = static_cast<size_t>(4 * images_per_group);
+    if (images.size() != total_expected) {
+        return false;
+    }
+
+    const int ref_w = images[0].cols;
+    const int ref_h = images[0].rows;
+    for (size_t i = 0; i < images.size(); ++i) {
+        if (images[i].empty() || images[i].type() != CV_8UC1) {
+            return false;
+        }
+        if (images[i].cols != ref_w || images[i].rows != ref_h) {
+            return false;
+        }
+    }
+
+    if (images_per_group == 1) {
+        return Calibrate(images, config, out_result, out_diagnostic);
+    }
+
+    std::vector<cv::Mat> averaged_images;
+    averaged_images.reserve(4);
+
+    for (int group = 0; group < 4; ++group) {
+        cv::Mat accum(ref_h, ref_w, CV_32FC1, cv::Scalar(0));
+        const int start_idx = group * images_per_group;
+
+        for (int frame = 0; frame < images_per_group; ++frame) {
+            const int curr_idx = start_idx + frame;
+            cv::accumulate(images[curr_idx], accum);
+        }
+
+        accum.convertTo(accum, CV_32FC1, 1.0 / static_cast<double>(images_per_group));
+        cv::Mat avg_mono8;
+        accum.convertTo(avg_mono8, CV_8UC1);
+        averaged_images.push_back(avg_mono8);
+    }
+
+    return Calibrate(averaged_images, config, out_result, out_diagnostic);
+}
+
 bool WaferReflectanceLutCalibrator::ApplyLut(
     const cv::Mat& src,
     cv::Mat& dst,
