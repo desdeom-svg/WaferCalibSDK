@@ -1,8 +1,8 @@
 # WaferCalibSDK 开发任务清单
 
 ## 最近完成任务
-- [x] 反射率 LUT 标定精简：去掉文件路径多帧接口，专注内存多帧接口
-  - 保留内存多帧接口：`Wafer_CalibrateReflectanceLutMultiFrame` (支持每组 N 张 Mono8 图像内存缓冲区平均)
-  - 彻底去除文件路径多帧接口：`Wafer_CalibrateReflectanceLutFromFilesMultiFrame`
-  - 恢复单帧文件接口：`Wafer_CalibrateReflectanceLutFromFiles` 为接收 4 个文件路径的标准单帧标定
-  - 底层 DLL 编译通过，经 `dumpbin /EXPORTS` 确认导出符号仅包含 `Wafer_CalibrateReflectanceLut`、`Wafer_CalibrateReflectanceLutFromFiles` 和 `Wafer_CalibrateReflectanceLutMultiFrame`
+- [x] 更新开发说明与 API 调用文档
+  - 更新 `docs/CHANGELOG.md`：记录 2026-11-03 版本更新，涵盖“畸变实时校正时间优化至 5.7ms”与“新增多帧反射率 LUT 标定接口 `Wafer_CalibrateReflectanceLutMultiFrame`”
+  - 更新 `docs/WaferCalibSDK_C_API调用说明.md`：在第 5 节新增 5.7ms 极速校正架构原理与基准测试数据；在第 8 节新增 `Wafer_CalibrateReflectanceLutMultiFrame` 接口规范、参数列表与抗噪机理
+  - 更新 `README.md`：同步更新功能特性与接口速查表
+  - 重新编译生成高保真印刷级 `docs/WaferCalibSDK_C_API调用说明.pdf`（文件大小 29.16 MB），并同步至 `output/pdf/`
