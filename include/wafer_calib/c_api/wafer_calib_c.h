@@ -522,22 +522,7 @@ WAFER_API int Wafer_CalibrateReflectanceLutMultiFrame(
     unsigned char* result_bgr
 );
 
-/**
- * @brief 从文件路径读取 4 组已知反射率标定图 (每组 N 张文件) 进行多帧平均后标定计算 LUT。
- * @param file_paths 包含 4 * images_per_group 个图像文件路径的数组。
- * @param images_per_group 每组反射率下的重复拍摄图片张数 N (N >= 1)。
- * @param config 标定配置参数，传 NULL 时采用默认参数。
- * @param out_result 输出标定结果结构体指针；传 NULL 时不获取。
- * @param save_diagnostic_image_path 诊断大图保存路径；传 NULL 或空字符串时不保存。
- * @return WAFER_SUCCESS 或 WAFER_ERR_* 错误码。
- */
-WAFER_API int Wafer_CalibrateReflectanceLutFromFilesMultiFrame(
-    const char** file_paths,
-    int images_per_group,
-    const WaferReflectanceLutConfig* config,
-    WaferReflectanceLutResult* out_result,
-    const char* save_diagnostic_image_path
-);
+
 
 /**
  * @brief 使用 256 元素 LUT 对单张 Mono8 图像进行超高速查表线性化校正 (在线生产每帧耗时约 1~2ms)。
