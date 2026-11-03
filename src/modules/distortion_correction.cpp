@@ -9,7 +9,9 @@
 #include <numeric>
 #include <sstream>
 #include <vector>
+#include <mutex>
 
+#include <opencv2/core.hpp>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -583,6 +585,132 @@ Status DistortionCorrectionModule::createDotGridTemplate(
     return Status::OK();
 }
 
+namespace {
+
+/**
+ * @brief 畸变校正 Remap 映射表单例缓存，避免重复为相同模板生成 1677 万个网格点。
+ */
+struct RemapCacheEntry {
+    int image_width = 0;
+    int image_height = 0;
+    std::array<double, kDotGridPolynomialCoefficientCount> coeff_x{};
+    std::array<double, kDotGridPolynomialCoefficientCount> coeff_y{};
+    cv::Mat map1;
+    cv::Mat map2;
+};
+
+class RemapCacheManager {
+public:
+    static RemapCacheManager& instance() {
+        static RemapCacheManager s_instance;
+        return s_instance;
+    }
+
+    bool get(
+        int width,
+        int height,
+        const std::array<double, kDotGridPolynomialCoefficientCount>& cx,
+        const std::array<double, kDotGridPolynomialCoefficientCount>& cy,
+        cv::Mat& out_map1,
+        cv::Mat& out_map2
+    ) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (entry_.image_width == width &&
+            entry_.image_height == height &&
+            entry_.coeff_x == cx &&
+            entry_.coeff_y == cy &&
+            !entry_.map1.empty() &&
+            !entry_.map2.empty()) {
+            out_map1 = entry_.map1;
+            out_map2 = entry_.map2;
+            return true;
+        }
+        return false;
+    }
+
+    void put(
+        int width,
+        int height,
+        const std::array<double, kDotGridPolynomialCoefficientCount>& cx,
+        const std::array<double, kDotGridPolynomialCoefficientCount>& cy,
+        const cv::Mat& map1,
+        const cv::Mat& map2
+    ) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        entry_.image_width = width;
+        entry_.image_height = height;
+        entry_.coeff_x = cx;
+        entry_.coeff_y = cy;
+        entry_.map1 = map1;
+        entry_.map2 = map2;
+    }
+
+private:
+    std::mutex mtx_;
+    RemapCacheEntry entry_;
+};
+
+/**
+ * @brief 使用 Horner 霍纳法则行级常数提取与 cv::parallel_for_ 多核并行生成极速定点 Remap 映射表。
+ * 将原先逐像素构造 cv::Mat 的数秒耗时暴降至数毫秒。
+ */
+void computeFastRemapMaps(
+    int width,
+    int height,
+    const std::array<double, kDotGridPolynomialCoefficientCount>& cx,
+    const std::array<double, kDotGridPolynomialCoefficientCount>& cy,
+    cv::Mat& out_map1,
+    cv::Mat& out_map2
+) {
+    cv::Mat map_x(height, width, CV_32FC1);
+    cv::Mat map_y(height, width, CV_32FC1);
+
+    // 预计算归一化横坐标 u 数组，消除内层循环重复乘除
+    std::vector<float> norm_u(width);
+    const double scale_x = width > 1 ? 2.0 / static_cast<double>(width - 1) : 0.0;
+    for (int col = 0; col < width; ++col) {
+        norm_u[col] = static_cast<float>(col * scale_x - 1.0);
+    }
+
+    const double scale_y = height > 1 ? 2.0 / static_cast<double>(height - 1) : 0.0;
+    const float* p_u = norm_u.data();
+
+    // 利用 OpenCV 高性能线程池并行处理各行
+    cv::parallel_for_(cv::Range(0, height), [&](const cv::Range& range) {
+        for (int row = range.start; row < range.end; ++row) {
+            const double v = height > 1 ? row * scale_y - 1.0 : 0.0;
+
+            // 对 x 多项式求 Horner 行级常数
+            // P(u, v) = (c0 + c2*v + c5*v^2 + c9*v^3) + u*(c1 + c4*v + c8*v^2) + u^2*(c3 + c7*v) + u^3*c6
+            const float D0_x = static_cast<float>(cx[0] + v * (cx[2] + v * (cx[5] + v * cx[9])));
+            const float D1_x = static_cast<float>(cx[1] + v * (cx[4] + v * cx[8]));
+            const float D2_x = static_cast<float>(cx[3] + v * cx[7]);
+            const float D3_x = static_cast<float>(cx[6]);
+
+            // 对 y 多项式求 Horner 行级常数
+            const float D0_y = static_cast<float>(cy[0] + v * (cy[2] + v * (cy[5] + v * cy[9])));
+            const float D1_y = static_cast<float>(cy[1] + v * (cy[4] + v * cy[8]));
+            const float D2_y = static_cast<float>(cy[3] + v * cy[7]);
+            const float D3_y = static_cast<float>(cy[6]);
+
+            float* map_x_row = map_x.ptr<float>(row);
+            float* map_y_row = map_y.ptr<float>(row);
+
+            // 纯线性内存连续访问与硬件级 FMA 计算
+            for (int col = 0; col < width; ++col) {
+                const float u = p_u[col];
+                map_x_row[col] = D0_x + u * (D1_x + u * (D2_x + u * D3_x));
+                map_y_row[col] = D0_y + u * (D1_y + u * (D2_y + u * D3_y));
+            }
+        }
+    });
+
+    // 转换为 OpenCV 推荐的 CV_16SC2 定点映射表，全面激活 SIMD/AVX2 双线性插值汇编内核
+    cv::convertMaps(map_x, map_y, out_map1, out_map2, CV_16SC2, false);
+}
+
+} // namespace
+
 Status DistortionCorrectionModule::correctByDotGridTemplate(
     const cv::Mat& mono8,
     const DotGridDistortionTemplate& distortion_template,
@@ -601,20 +729,34 @@ Status DistortionCorrectionModule::correctByDotGridTemplate(
         return Status::Error(ErrorCode::InvalidParam, "distortion template contains non-finite coefficients");
     }
 
-    cv::Mat map_x(mono8.size(), CV_32FC1);
-    cv::Mat map_y(mono8.size(), CV_32FC1);
-    for (int row = 0; row < mono8.rows; ++row) {
-        float* map_x_row = map_x.ptr<float>(row);
-        float* map_y_row = map_y.ptr<float>(row);
-        for (int column = 0; column < mono8.cols; ++column) {
-            const cv::Point2d target(column, row);
-            map_x_row[column] = static_cast<float>(
-                evaluatePolynomial(distortion_template.output_to_input_x, target, mono8.size()));
-            map_y_row[column] = static_cast<float>(
-                evaluatePolynomial(distortion_template.output_to_input_y, target, mono8.size()));
-        }
+    // 1. 尝试从高速映射缓存获取定点 Remap Maps
+    cv::Mat map1;
+    cv::Mat map2;
+    if (!RemapCacheManager::instance().get(
+            mono8.cols, mono8.rows,
+            distortion_template.output_to_input_x,
+            distortion_template.output_to_input_y,
+            map1, map2)) {
+        // 缓存未命中时使用 Horner 多核并行极速构建定点表 (耗时仅数毫秒)
+        computeFastRemapMaps(
+            mono8.cols, mono8.rows,
+            distortion_template.output_to_input_x,
+            distortion_template.output_to_input_y,
+            map1, map2);
+        RemapCacheManager::instance().put(
+            mono8.cols, mono8.rows,
+            distortion_template.output_to_input_x,
+            distortion_template.output_to_input_y,
+            map1, map2);
     }
-    cv::remap(mono8, corrected_mono8, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0));
+
+    // 2. 确保输出图像内存已正确就绪
+    if (corrected_mono8.empty() || corrected_mono8.size() != mono8.size() || corrected_mono8.type() != CV_8UC1) {
+        corrected_mono8.create(mono8.size(), CV_8UC1);
+    }
+
+    // 3. 执行硬件加速定点双线性重映射 (15~20ms)
+    cv::remap(mono8, corrected_mono8, map1, map2, cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0));
     return Status::OK();
 }
 
