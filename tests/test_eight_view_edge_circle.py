@@ -72,16 +72,42 @@ class Tests(unittest.TestCase):
 
 def replay():
     records=[]
-    for name,scale in [('EdgeImage_1.5X_thick_8',3.),('EdgeImage_2.5X_thick_8',1.8),('EdgeImage_2.5X_8',1.8)]:
-        folder=pathlib.Path(r'D:\images\谷神星\标准化')/name;files=sorted(folder.glob('*.jpg'));assert len(files)==8
-        images=[cv2.imdecode(np.fromfile(f,np.uint8),0) for f in files]
-        stages=[[float(x) for x in re.sub(r' \(\d+\)$','',f.stem).split('_')[1:]] for f in files]
-        code,out=invoke(images,stages,scale)
-        assert code==0 and np.isfinite(out['notch_angle_deg']),(name,code,out)
-        records.append({'folder':str(folder),'pixel_size_um':scale,'return_code':code,'result':out,'files':[{'path':str(f),'sha256':hashlib.sha256(f.read_bytes()).hexdigest()} for f in files]})
-    output=ROOT/'output/EightViewEdgeCircle';output.mkdir(exist_ok=True)
-    (output/'dll_replay.json').write_text(json.dumps({'dll':str(DLL),'dll_sha256':hashlib.sha256(DLL.read_bytes()).hexdigest(),'records':records},ensure_ascii=False,indent=2),encoding='utf-8')
-    for r in records:print(r['folder'],r['result'])
+    test_folders = [
+        (pathlib.Path(r'D:\images\谷神星\标准化\EdgeImage'), 1.8),
+        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_2.5X_8'), 1.8),
+        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_2.5X_thick_8'), 1.8),
+        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_1.5X_thick_8'), 3.0),
+        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage'), 1.8),
+    ]
+    for folder, scale in test_folders:
+        files = [None] * 8
+        stages = [None] * 8
+        for f in folder.glob('*.*'):
+            if f.suffix.lower() not in ['.bmp', '.jpg']: continue
+            m = re.match(r'^(\d+)_([-\d\.]+)_([-\d\.]+?)(?:[\s\(].*|\.(?:bmp|jpg))$', f.name)
+            if m:
+                idx = int(m.group(1))
+                files[idx] = f
+                stages[idx] = [float(m.group(2)), float(m.group(3))]
+        assert all(f is not None for f in files), f"Missing images in {folder}"
+        images = [cv2.imdecode(np.fromfile(f, np.uint8), 0) for f in files]
+        code, out = invoke(images, stages, scale)
+        assert code == 0 and np.isfinite(out['notch_angle_deg']), (str(folder), code, out)
+        records.append({
+            'folder': str(folder),
+            'pixel_size_um': scale,
+            'return_code': code,
+            'result': out,
+            'files': [{'path': str(f), 'sha256': hashlib.sha256(f.read_bytes()).hexdigest()} for f in files]
+        })
+    output = ROOT / 'output/EightViewEdgeCircle'
+    output.mkdir(exist_ok=True, parents=True)
+    (output / 'dll_replay.json').write_text(
+        json.dumps({'dll': str(DLL), 'dll_sha256': hashlib.sha256(DLL.read_bytes()).hexdigest(), 'records': records}, ensure_ascii=False, indent=2),
+        encoding='utf-8'
+    )
+    for r in records:
+        print(f"PASS: {r['folder']} -> {r['result']}")
 
 if __name__=='__main__':
     if '--replay' in sys.argv:replay()

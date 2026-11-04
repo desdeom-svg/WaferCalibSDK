@@ -81,31 +81,71 @@ bool extractEdgeDirectional(
             row[x] = source[scan_from_right ? width - 1 - x : x];
         }
 
-        const double bg = quantile(row, 0.10);
-        const double signal = quantile(row, 0.85);
-        if (signal - bg < 5.0) {
+        // 避免两端边界干扰，在安全区间采样动态范围，自适应兼容黑场与反光台面
+        const int check_start = std::min(50, width / 4);
+        const int check_end = std::max(width - 50, width * 3 / 4);
+        if (check_end <= check_start) {
             continue;
         }
 
-        const double coarseThreshold = bg + 0.40 * (signal - bg);
-        int run = 0;
-        int coarse = -1;
-        for (int x = 0; x < width; ++x) {
-            run = (row[x] > coarseThreshold) ? (run + 1) : 0;
-            if (run == 15) {
-                coarse = x - 14;
-                break;
+        double min_val = row[check_start];
+        double max_val = row[check_start];
+        for (int x = check_start; x < check_end; ++x) {
+            if (row[x] < min_val) {
+                min_val = row[x];
+            }
+            if (row[x] > max_val) {
+                max_val = row[x];
             }
         }
-        if (coarse < 130 || coarse >= width - 130) {
+
+        if (max_val - min_val < 15.0) {
             continue;
         }
 
-        std::vector<double> exterior(row.begin() + coarse - 120, row.begin() + coarse - 60);
-        std::vector<double> interior(row.begin() + coarse + 30, row.begin() + coarse + 100);
-        const double b = quantile(exterior, 0.50);
-        const double s = quantile(interior, 0.50);
-        if (s - b < 5.0) {
+        // 双模态状态机：无论背景是全黑还是反光，进入晶圆前必然经过倒角暗谷
+        const double dark_th = min_val + 0.25 * (max_val - min_val);
+        const double coarse_th = min_val + 0.40 * (max_val - min_val);
+
+        bool seen_dark = false;
+        int coarse = -1;
+        int run = 0;
+        for (int x = 0; x < width; ++x) {
+            if (row[x] <= dark_th) {
+                seen_dark = true;
+            }
+            if (seen_dark) {
+                if (row[x] > coarse_th) {
+                    ++run;
+                } else {
+                    run = 0;
+                }
+                if (run == 15) {
+                    coarse = x - 14;
+                    break;
+                }
+            }
+        }
+
+        if (coarse < 100 || coarse >= width - 100) {
+            continue;
+        }
+
+        // 局部自适应基准：外侧暗谷基准 b 与内侧晶圆表面基准 s
+        const int ext_start = std::max(0, coarse - 60);
+        const int ext_end = std::max(1, coarse - 10);
+        const int int_start = std::min(width - 1, coarse + 30);
+        const int int_end = std::min(width, coarse + 100);
+
+        if (int_end <= int_start || ext_end <= ext_start) {
+            continue;
+        }
+
+        std::vector<double> exterior(row.begin() + ext_start, row.begin() + ext_end);
+        std::vector<double> interior(row.begin() + int_start, row.begin() + int_end);
+        const double b = quantile(exterior, 0.30);
+        const double s = quantile(interior, 0.70);
+        if (s - b < 10.0 || s >= 254.0) {
             continue;
         }
 
@@ -116,16 +156,21 @@ bool extractEdgeDirectional(
         const double sigma = 1.4826 * quantile(noise, 0.50);
         const double threshold = b + 0.15 * (s - b);
 
-        if (threshold - b < 3.0 * sigma || s >= 254.0) {
+        if (threshold - b < 3.0 * sigma) {
             continue;
         }
 
-        for (int x = coarse - 100; x < coarse + 30; ++x) {
+        const int search_start = std::max(0, coarse - 50);
+        const int search_end = std::min(width - 1, coarse + 30);
+        for (int x = search_start; x < search_end; ++x) {
             if (row[x] <= threshold && row[x + 1] > threshold) {
-                const double subpixel = x + (threshold - row[x]) / (row[x + 1] - row[x]);
-                const double actual_x = scan_from_right ? (width - 1.0 - subpixel) : subpixel;
-                points.emplace_back(actual_x, static_cast<double>(y));
-                break;
+                const double denom = row[x + 1] - row[x];
+                if (denom > 1e-6) {
+                    const double subpixel = x + (threshold - row[x]) / denom;
+                    const double actual_x = scan_from_right ? (width - 1.0 - subpixel) : subpixel;
+                    points.emplace_back(actual_x, static_cast<double>(y));
+                    break;
+                }
             }
         }
     }
@@ -167,7 +212,7 @@ bool detectEdge(const cv::Mat& image, int view, Points& points, bool filter = tr
     // 若右侧明显较暗，则黑场在右侧（scan_from_right = true）；
     // 若两侧差异不显著，则参考原入参 view < 2 作为初选建议
     bool preferred_scan_from_right = (view < 2);
-    if (std::abs(right_median - left_median) >= 5.0) {
+    if (std::abs(right_median - left_median) >= 15.0) {
         preferred_scan_from_right = (right_median < left_median);
     }
 
@@ -262,7 +307,6 @@ double notchAngle(const Points& edge, const double* stage, int width, int height
                 (depths[j] > level && depths[j+1] <= level)) {
                 // Do not bridge missing edge detections across a reflection or particle.
                 if (std::abs(edge[j+1].x - edge[j].x) > 8. * std::max(1, width / 1024)) {
-                    crossings.push_back(std::numeric_limits<double>::quiet_NaN());
                     continue;
                 }
                 crossings.push_back(angles[j] + (level - depths[j]) /
@@ -335,13 +379,36 @@ extern "C" WAFER_API int Wafer_FindFourViewEdgeCircle(
 
         for (int i = 0; i < 4; ++i) {
             cv::Mat input(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i]));
-            if (!detectEdge(input, i, groups[i])) return WAFER_ERR_FEATURE_NOT_FOUND;
+            if (!detectEdge(input, i, groups[i])) {
+                return WAFER_ERR_FEATURE_NOT_FOUND;
+            }
             for (auto& p : groups[i]) {
-                p = toWorld(p, stage_xy_mm + 2*i, width, height, scale, sign_x, sign_y);
+                p = toWorld(p, stage_xy_mm + 2 * i, width, height, scale, sign_x, sign_y);
             }
         }
         cv::Vec3d circle;
-        if (!fitCircle(groups, circle)) return WAFER_ERR_FITTING_FAILED;
+        if (!fitCircle(groups, circle)) {
+            return WAFER_ERR_FITTING_FAILED;
+        }
+
+        // 剔除偏离粗圆超过 1.5mm 的离群杂斑点（如镜头暗角、机械反光）
+        for (int i = 0; i < 4; ++i) {
+            Points clean_group;
+            clean_group.reserve(groups[i].size());
+            for (const auto& p : groups[i]) {
+                const double d = std::hypot(p.x - circle[0], p.y - circle[1]);
+                if (std::abs(d - circle[2]) < 1.5) {
+                    clean_group.push_back(p);
+                }
+            }
+            if (clean_group.size() < 30) {
+                return WAFER_ERR_FEATURE_NOT_FOUND;
+            }
+            groups[i] = std::move(clean_group);
+        }
+        if (!fitCircle(groups, circle)) {
+            return WAFER_ERR_FITTING_FAILED;
+        }
         double mse = 0., maximum = 0.;
         for (const auto& group : groups) {
             double sum = 0.;
@@ -439,34 +506,85 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
             }
         }
         cv::Vec3d circle;
-        if (!fitCircle(seedGroups, circle)) return WAFER_ERR_FITTING_FAILED;
+        if (!fitCircle(seedGroups, circle)) {
+            return WAFER_ERR_FITTING_FAILED;
+        }
+
+        // 剔除各视野中偏离初解算粗圆超过 1.5mm 的离群杂斑点（如暗角渐晕、机械台反射）
+        for (int i = 0; i < 7; ++i) {
+            Points clean_group;
+            clean_group.reserve(seedGroups[i].size());
+            for (const auto& p : seedGroups[i]) {
+                const double d = std::hypot(p.x - circle[0], p.y - circle[1]);
+                if (std::abs(d - circle[2]) < 1.5) {
+                    clean_group.push_back(p);
+                }
+            }
+            if (clean_group.size() < 30) {
+                return WAFER_ERR_FEATURE_NOT_FOUND;
+            }
+            seedGroups[i] = std::move(clean_group);
+        }
+        if (!fitCircle(seedGroups, circle)) {
+            return WAFER_ERR_FITTING_FAILED;
+        }
+
         cv::Mat input(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[7])), scan;
         cv::transpose(input, scan);
-        Points raw, normal;
-        if (!detectEdge(scan, 0, raw, false, 1024)) return WAFER_ERR_FEATURE_NOT_FOUND;
-        double left = width, right = -1.;
+        Points raw, clean_raw, normal;
+        if (!detectEdge(scan, 0, raw, false, 1024)) {
+            return WAFER_ERR_FEATURE_NOT_FOUND;
+        }
+
+        // 剥离 View 7 底座反射等径向离群点，保留完整的 Notch 凹槽（~1mm 深）及外圆弧
         for (auto& p : raw) {
             std::swap(p.x, p.y);
             const auto q = toWorld(p, stage_xy_mm + 14, width, height, scale, sign_x, sign_y);
-            if (circle[2] - std::hypot(q.x - circle[0], q.y - circle[1]) > std::max(.1, 10. * scale)) {
-                left = std::min(left, p.x); right = std::max(right, p.x);
+            const double d = std::hypot(q.x - circle[0], q.y - circle[1]);
+            if (std::abs(d - circle[2]) < 1.5) {
+                clean_raw.push_back(p);
             }
         }
-        for (const auto& p : raw)
-            if (right < 0. || p.x < left - 60. || p.x > right + 60.)
+        if (clean_raw.size() < 30) {
+            return WAFER_ERR_FEATURE_NOT_FOUND;
+        }
+        raw = std::move(clean_raw);
+
+        double left = width, right = -1.;
+        for (const auto& p : raw) {
+            const auto q = toWorld(p, stage_xy_mm + 14, width, height, scale, sign_x, sign_y);
+            if (circle[2] - std::hypot(q.x - circle[0], q.y - circle[1]) > std::max(.1, 10. * scale)) {
+                left = std::min(left, p.x);
+                right = std::max(right, p.x);
+            }
+        }
+        for (const auto& p : raw) {
+            if (right < 0. || p.x < left - 60. || p.x > right + 60.) {
                 normal.emplace_back(p.y, p.x);
-        if (!filterEdge(normal, width)) return WAFER_ERR_FEATURE_NOT_FOUND;
+            }
+        }
+        if (!filterEdge(normal, width)) {
+            return WAFER_ERR_FEATURE_NOT_FOUND;
+        }
+
         std::array<Points, 8> groups;
-        for (int i = 0; i < 7; ++i) groups[i] = std::move(seedGroups[i]);
-        for (const auto& p : normal)
+        for (int i = 0; i < 7; ++i) {
+            groups[i] = std::move(seedGroups[i]);
+        }
+        for (const auto& p : normal) {
             groups[7].push_back(toWorld({p.y, p.x}, stage_xy_mm + 14, width, height, scale, sign_x, sign_y));
-        if (!fitCircle(groups, circle)) return WAFER_ERR_FITTING_FAILED;
+        }
+        if (!fitCircle(groups, circle)) {
+            return WAFER_ERR_FITTING_FAILED;
+        }
+
         double mse = 0., maximum = 0.;
         for (const auto& group : groups) {
             double sum = 0.;
             for (const auto& p : group) {
                 const double e = std::hypot(p.x - circle[0], p.y - circle[1]) - circle[2];
-                sum += e * e; maximum = std::max(maximum, std::abs(e));
+                sum += e * e;
+                maximum = std::max(maximum, std::abs(e));
             }
             mse += sum / (8. * group.size());
         }

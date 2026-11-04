@@ -1,69 +1,58 @@
-# 平场校正（Flat-Field Correction）极简接口开发计划
+# 8视野圆弧求圆心反光平台自适应边缘检测优化方案
 
-## 1. 需求与设计原则
+## 1. 问题背景与失效原因分析
 
-根据用户确认的最新方案，本次开发平场校正接口遵循以下原则：
-1. **彻底移除 `WaferFlatFieldConfig` 结构体**：
-   - 内部固化最优默认参数：均值融合算法 (`combine_method = 0`)、自动以中心 1/4 区域净均值为基准归一化 (`target_mode = 0`)；
-   - 仅保留单个截断上限参数 `float max_gain_clamp`（<=0 时默认取 3.5）。
-2. **纯内存数据指针传输**：
-   - 输入平场序列：`const unsigned char** flat_buffers, int flat_count`；
-   - 输入暗场模板：`const unsigned char* dark_template`（Mono8 指针，可为 NULL）；
-   - 输出增益矩阵：`float* out_gain_map`（32 位单通道浮点指针）；
-   - 实时校正接口：输入待测图指针 `input_image`、输出图指针 `output_image`、暗场指针 `dark_template`、增益指针 `gain_map`；
-   - 支持软件将平场增益保存为单通道 32 位浮点图像（Float32 TIFF / BIN），直接以数据指针进行读入与传输。
-3. **极简评估指标**：
-   - 保留结构体 `WaferFlatFieldMetrics`，仅包含 `raw_nu`（校正前非均匀度%）、`corrected_nu`（校正后非均匀度%）、`vignetting`（渐晕衰减率%）。
-4. **极致性能**：
-   - 实时在线平场校正内核采用多线程 OpenMP + SIMD 向量化加速，支持原地校正 (`out == in`) 与无暗场快速分支 (`dark == NULL`)，单帧 4096×4096 耗时稳定在 2.5ms 左右。
+### 1.1 图像现象
+针对数据集 `D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage`：
+- **历史黑场数据集**：晶圆为亮区（~190 DN），承载台为纯黑背景（~15 DN），两者灰度差达 170 DN 以上，呈典型单调阶跃边缘。
+- **本次失败数据集**：承载台由于机械阳极氧化或金属反光呈现灰色（~65~75 DN），晶圆内部也是灰色（~80~85 DN），晶圆内部与平台灰度仅差 10~15 DN。
+- **物理特征**：无论背景全黑还是反光，晶圆倒角（Bevel）处的光学斜面反射/散射特性必然在图像中形成一条深达 0~15 DN 的**“倒角暗谷”（Trough / Dark Valley）**。
 
----
-
-## 2. 详细接口设计与文件组织
-
-### 2.1 C++ 模块层
-- **头文件**：`include/wafer_calib/modules/flat_field.hpp`
-- **源文件**：`src/modules/flat_field.cpp`
-- **核心方法**：
-  - `FlatFieldModule::calibrate(...)`
-  - `FlatFieldModule::apply(...)`
-
-### 2.2 C ABI 导出层
-- **头文件**：`include/wafer_calib/c_api/wafer_calib_c.h`
-  - 定义 `WaferFlatFieldMetrics`
-  - 声明 `Wafer_CalibrateFlatField`
-  - 声明 `Wafer_ApplyFlatFieldCorrection`
-- **源文件**：`src/c_api/wafer_calib_c.cpp`
-  - 实现 C ABI 参数校验、异常捕获与调用转接。
+### 1.2 原算法失效机理
+原 `extractEdgeDirectional` 函数中：
+```cpp
+const double bg = quantile(row, 0.10);
+const double signal = quantile(row, 0.85);
+const double coarseThreshold = bg + 0.40 * (signal - bg);
+```
+在反光平台下，$bg \approx 10$（倒角暗谷），$signal \approx 82$，计算得 $coarseThreshold \approx 39$（或更高）。
+扫描从起始点 $x = 0$ 开始，起始点位于反光平台上，其灰度为 70~75 DN，从一开始就大于 $coarseThreshold$。
+算法检测到连续 15 个像素大于阈值，立刻在 $x = 0$ 处判定为晶圆上升沿（`coarse = 0`）。随后因为触发了边界保护条件 `coarse < 130`，整行被判定为异常并直接丢弃。
+这导致所有 8 个视野提取到的有效边缘点数不足 30，最终返回错误码 `WAFER_ERR_FEATURE_NOT_FOUND (4)`。
 
 ---
 
-## 3. 验证与测试步骤
+## 2. 核心算法优化设计
 
-1. 编译构建 `WaferCalibSDK.dll`；
-2. 编写独立测试程序对现场数据集 `D:\images\谷神星\标准化\预处理\test\5X（900-5）` 进行实测：
-   - 暗场：32 帧合成 `dark_template`；
-   - 平场：分别对 1# (90%)、2# (75%)、3# (50%)、4# (10%) 各 32 帧执行标定；
-   - 验证模板文件保存为 32 位 Float TIFF 与二进制文件；
-   - 验证单帧在线校正延时与质量改善指标；
-3. 输出测试报告并同步 DLL 到 `WaferCalibTester`。
+### 2.1 双模态自适应边缘定位机制（状态机 seen_dark + 倒角暗谷爬升）
+- **动态极值与范围判定**：
+  在有效范围内检测行像素动态范围 $\Delta = \max - \min$。若 $\Delta < 15.0$ 则跳过。
+- **暗谷状态机**：
+  设定暗区阈值 $dark\_th = \min + 0.25 \times \Delta$，上升沿粗阈值 $coarse\_th = \min + 0.40 \times \Delta$。
+  沿扫描方向行进时，必须先经历暗谷（$row[x] \le dark\_th$，标记 $seen\_dark = true$）。
+  只有经历过暗区后，再爬升超越 $coarse\_th$ 并连续 15 个像素保持，才认定为真正的晶圆边缘起点 $coarse$。
+  - 黑场背景：起点本身即满足 $\le dark\_th$，$seen\_dark$ 立即置真，进入晶圆后爬升，逻辑与原算法完全契合；
+  - 反光平台：起点处于平台反光区（$> dark\_th$），$seen\_dark = false$，不会在起点误触发；光线进入晶圆倒角暗谷时触发 $seen\_dark = true$，随后从暗谷爬升到晶圆内侧，准确定位上升沿。
 
+### 2.2 局部自适应基准与亚像素插值
+- 外侧暗场基准 $b$：取 $[coarse - 60, coarse - 10)$ 的 30% 分位数；
+- 内侧晶圆基准 $s$：取 $[coarse + 30, coarse + 100)$ 的 70% 分位数；
+- 亚像素插值阈值：$th = b + 0.15 \times (s - b)$；
+- 搜索区间 $[coarse - 50, coarse + 30)$ 内首次穿越 $th$ 的位置进行线性亚像素插值。
+
+### 2.3 Notch 凹槽检测与杂光抑制优化
+- 在 `notchAngle` 计算等深线切面交点时，若两点横向距离跳变过大（伪跳变），直接跳过（`continue`），不向 `crossings` 压入 NaN，确保切面交点数严格为 2，稳定提取 Notch 角度；
+- 在 View 7 中对提取的原始点按与粗圆半径偏差（$|\Delta r| \le 2.0\text{ mm}$）进行有效性过滤，剥离机械台底边缘杂光反光。
 
 ---
 
-# 暗场-平场-LUT 一体化极速流水线接口与文档升级计划
+## 3. 验证方案与成功标准
 
-## 1. 需求与设计原则
-
-1. **三合一融合预处理接口**：
-   - 在线预处理链路包含三步：暗场扣除 $\to$ 平场增益校正 $\to$ LUT 线性化查表。
-   - 分步调用会经历 2 次大内存读写；通过融合在单次 OpenMP 循环中执行：
-     $$I_{\text{out}}[i] = \text{LUT}\left[ \text{clamp}\left( (I_{\text{in}}[i] - D[i]) \times \text{Gain}[i] + 0.5 \right) \right]$$
-     单次访存完成全部操作，彻底消除中间缓冲区与缓存换出开销。
-   - 接口定义：`Wafer_ApplyPreprocessPipeline(input, output, w, h, dark, gain, lut)`。
-   - 支持原地就地校正 (`output == input`)，支持 `dark` 或 `lut` 为 `NULL` 时的自适应分支。
-
-2. **文档与交付物升级**：
-   - **更新说明文档**：创建 `docs/CHANGELOG.md`，按发布日期梳理历史重大功能（八视野缺口、平场校正、流水线一体化）。
-   - **接口使用说明**：更新 `docs/WaferCalibSDK_C_API调用说明.md`，新增“第十二章：平场校正与暗场-平场-LUT极速预处理流水线”，详细补充物理原理、离线标定流程图、在线实时流水线时序、各接口参数说明与 C# P/Invoke 范例。
-   - **PDF 说明文档导出**：调用 `tools/convert_docs_to_pdf.py` 生成高质量的 `WaferCalibSDK_C_API调用说明.pdf`。
+1. **编译验证**：CMake 构建成功，0 警告 0 错误；
+2. **单元测试回归**：`test_four_view_edge_circle.py` 与 `test_eight_view_edge_circle.py` 均 PASS；
+3. **5 个全量数据集实测比对**：
+   - 目标数据集 `8视野圆弧求圆心\EdgeImage` 正常解算，输出中心约为 $(1.68, -84.00)\text{ mm}$，半径约为 $149.69\text{ mm}$，Notch 角度约为 $1.06^\circ$，RMS 残差 $< 20\ \mu\text{m}$；
+   - 历史 4 个数据集指标完全一致，无任何回归。
+4. **交付物齐备**：
+   - 更新文档：`CHANGELOG.md`、`WaferCalibSDK_C_API调用说明.md`、`.ai_docs/walkthrough.md`；
+   - 重新生成高保真 PDF `docs/WaferCalibSDK_C_API调用说明.pdf`。
