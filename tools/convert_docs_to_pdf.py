@@ -21,6 +21,28 @@ def main():
     with open(md_path, 'r', encoding='utf-8') as f:
         md_text = f.read()
 
+    # 预处理：消除表格行之间可能存在的意外空行，确保 Markdown 引擎 100% 识别并渲染为原生 HTML 表格
+    def sanitize_markdown_tables(text):
+        lines = text.splitlines()
+        new_lines = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            stripped = line.strip()
+            is_table_row = stripped.startswith('|') and len(stripped) > 1 and '|' in stripped[1:]
+            new_lines.append(line)
+            i += 1
+            if is_table_row:
+                while i < n and not lines[i].strip():
+                    if i + 1 < n and (lines[i+1].strip().startswith('|') and '|' in lines[i+1].strip()[1:]):
+                        i += 1
+                    else:
+                        break
+        return '\n'.join(new_lines)
+
+    md_text = sanitize_markdown_tables(md_text)
+
     # 1. 将 markdown 中引用的 images/*.png 转为 Base64 内嵌图片，确保 PDF 渲染绝对不丢图
     def embed_base64_image(match):
         alt = match.group(1)
