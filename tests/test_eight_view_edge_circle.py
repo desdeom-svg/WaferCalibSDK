@@ -73,11 +73,13 @@ class Tests(unittest.TestCase):
 def replay():
     records=[]
     test_folders = [
-        (pathlib.Path(r'D:\images\谷神星\标准化\EdgeImage'), 1.8),
+        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_8'), 1.8),
+        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage1_8'), 1.8),
+        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_1.5X_8'), 3.0),
+        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_1.5X_thick_8'), 3.0),
         (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_2.5X_8'), 1.8),
         (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_2.5X_thick_8'), 1.8),
-        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage_1.5X_thick_8'), 3.0),
-        (pathlib.Path(r'D:\images\谷神星\标准化\8视野圆弧求圆心\EdgeImage'), 1.8),
+        (pathlib.Path(r'D:\images\谷神星\标准化\EdgeImage'), 1.8),
     ]
     for folder, scale in test_folders:
         files = [None] * 8

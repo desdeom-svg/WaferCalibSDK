@@ -10,40 +10,85 @@
 namespace {
 using Points = std::vector<cv::Point2d>;
 
+// 计算数组指定分位数（输入按值拷贝以支持原地 nth_element）
 double quantile(std::vector<double> values, double fraction) {
-    const size_t k = static_cast<size_t>(fraction * (values.size() - 1));
-    std::nth_element(values.begin(), values.begin() + k, values.end());
+    if (values.empty()) {
+        return 0.0;
+    }
+    const size_t k = static_cast<size_t>(fraction * static_cast<double>(values.size() - 1));
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(k), values.end());
     return values[k];
 }
 
-// Fit local edge geometry only to reject particles, never to extrapolate a circle center.
-bool filterEdge(Points& points, int height) {
-    if (points.size() < 30) return false;
+// 计算一行内指定区间 [start_idx, end_idx) 的分位数（兼容 NumPy 线性插值百分位）
+double slicePercentile(const std::vector<double>& row, int start_idx, int end_idx, double fraction) {
+    const int n_total = static_cast<int>(row.size());
+    const int s = std::max(0, std::min(n_total, start_idx));
+    const int e = std::max(s, std::min(n_total, end_idx));
+    if (e <= s) {
+        return 0.0;
+    }
+    std::vector<double> sub(row.begin() + s, row.begin() + e);
+    std::sort(sub.begin(), sub.end());
+    if (sub.size() == 1) {
+        return sub[0];
+    }
+    const double pos = fraction * static_cast<double>(sub.size() - 1);
+    const size_t lo = static_cast<size_t>(std::floor(pos));
+    const size_t hi = static_cast<size_t>(std::ceil(pos));
+    const double weight = pos - static_cast<double>(lo);
+    return sub[lo] * (1.0 - weight) + sub[hi] * weight;
+}
+
+// 局部二次曲线鲁棒拟合与物理切线斜率校验（剔除表面颗粒、刀纹及水平/垂直 IC 电路线条）
+bool filterEdgeWithSlope(Points& points, int height, int view_idx, bool check_slope) {
+    if (points.size() < 30) {
+        return false;
+    }
     Points retained = points;
+    double c1 = 0.0;
     for (int iteration = 0; iteration < 4; ++iteration) {
         cv::Mat a(static_cast<int>(retained.size()), 3, CV_64F);
         cv::Mat b(static_cast<int>(retained.size()), 1, CV_64F);
         for (int j = 0; j < a.rows; ++j) {
-            const double y = (retained[j].y - height * .5) / height;
-            a.at<double>(j, 0) = 1.; a.at<double>(j, 1) = y; a.at<double>(j, 2) = y * y;
-            b.at<double>(j) = retained[j].x;
+            const double y = (retained[j].y - height * 0.5) / height;
+            a.at<double>(j, 0) = 1.0;
+            a.at<double>(j, 1) = y;
+            a.at<double>(j, 2) = y * y;
+            b.at<double>(j, 0) = retained[j].x;
         }
         cv::Mat c;
-        if (!cv::solve(a, b, c, cv::DECOMP_SVD)) return false;
+        if (!cv::solve(a, b, c, cv::DECOMP_SVD)) {
+            return false;
+        }
+        const double c0 = c.at<double>(0);
+        c1 = c.at<double>(1);
+        const double c2 = c.at<double>(2);
         auto residual = [&](const cv::Point2d& p) {
-            const double y = (p.y - height * .5) / height;
-            return p.x - (c.at<double>(0) + c.at<double>(1) * y + c.at<double>(2) * y * y);
+            const double y = (p.y - height * 0.5) / height;
+            return p.x - (c0 + c1 * y + c2 * y * y);
         };
         std::vector<double> errors;
-        for (const auto& p : retained) errors.push_back(residual(p));
-        const double median = quantile(errors, .5);
-        for (double& e : errors) e = std::abs(e - median);
-        const double limit = std::max(3., 4. * 1.4826 * quantile(errors, .5));
+        errors.reserve(retained.size());
+        for (const auto& p : retained) {
+            errors.push_back(residual(p));
+        }
+        const double median = quantile(errors, 0.5);
+        for (double& e : errors) {
+            e = std::abs(e - median);
+        }
+        const double limit = std::max(2.5, 3.5 * 1.4826 * quantile(errors, 0.5));
         retained.clear();
-        for (const auto& p : points)
-            if (std::abs(residual(p) - median) < limit) retained.push_back(p);
-        if (retained.size() < 30) return false;
+        for (const auto& p : points) {
+            if (std::abs(residual(p) - median) < limit) {
+                retained.push_back(p);
+            }
+        }
+        if (retained.size() < 30) {
+            return false;
+        }
     }
+
     double min_y = retained.front().y;
     double max_y = retained.front().y;
     for (const auto& p : retained) {
@@ -57,341 +102,450 @@ bool filterEdge(Points& points, int height) {
     if (max_y - min_y < height * 0.20) {
         return false;
     }
+
+    if (check_slope) {
+        const double slope = std::abs(c1 / static_cast<double>(height));
+        if (view_idx < 4) {
+            // 四角视野（45度方向）：晶圆圆弧切线斜率 |dx/dy| 理论值为 1.0
+            if (slope < 0.45 || slope > 1.85) {
+                return false;
+            }
+        } else {
+            // 正交视野（0/90度方向，其中上下视野已转置）：晶圆圆弧切线斜率 |dx/dy| 理论值为 0.0
+            if (slope > 0.35) {
+                return false;
+            }
+        }
+    }
+
     points.swap(retained);
     return true;
 }
 
-bool extractEdgeDirectional(
-    const cv::Mat& smooth,
-    bool scan_from_right,
-    bool filter,
-    int density,
-    Points& points
-) {
-    points.clear();
-    const int width = smooth.cols;
-    const int height = smooth.rows;
-    const int margin = std::max(16, height / 32);
-    const int step = std::max(1, height / density);
-    std::vector<double> row(width);
-
-    for (int y = margin; y < height - margin; y += step) {
-        const float* source = smooth.ptr<float>(y);
-        for (int x = 0; x < width; ++x) {
-            row[x] = source[scan_from_right ? width - 1 - x : x];
-        }
-
-        // 避免两端边界干扰，在安全区间采样动态范围，自适应兼容黑场与反光台面
-        const int check_start = std::min(50, width / 4);
-        const int check_end = std::max(width - 50, width * 3 / 4);
-        if (check_end <= check_start) {
-            continue;
-        }
-
-        double min_val = row[check_start];
-        double max_val = row[check_start];
-        for (int x = check_start; x < check_end; ++x) {
-            if (row[x] < min_val) {
-                min_val = row[x];
-            }
-            if (row[x] > max_val) {
-                max_val = row[x];
-            }
-        }
-
-        if (max_val - min_val < 15.0) {
-            continue;
-        }
-
-        // 双模态状态机：无论背景是全黑还是反光，进入晶圆前必然经过倒角暗谷
-        const double dark_th = min_val + 0.25 * (max_val - min_val);
-        const double coarse_th = min_val + 0.40 * (max_val - min_val);
-
-        bool seen_dark = false;
-        int coarse = -1;
-        int run = 0;
-        for (int x = 0; x < width; ++x) {
-            if (row[x] <= dark_th) {
-                seen_dark = true;
-            }
-            if (seen_dark) {
-                if (row[x] > coarse_th) {
-                    ++run;
-                } else {
-                    run = 0;
+// 单行局部双窗口多候选亚像素边缘提取（同时兼容黑场、反光刀纹底座、暗场窄脉冲亮线及双圆弧去边环）
+void extractRowCandidates(const std::vector<double>& row, std::vector<double>& cands) {
+    cands.clear();
+    const int w = static_cast<int>(row.size());
+    int x = 60;
+    while (x < w - 80) {
+        if (row[x] < 42.0) {
+            const int ahead_end = std::min(w - 40, x + 120);
+            if (ahead_end > x + 4) {
+                double max_ahead = row[x];
+                for (int k = x; k < ahead_end; ++k) {
+                    if (row[k] > max_ahead) {
+                        max_ahead = row[k];
+                    }
                 }
-                if (run == 15) {
-                    coarse = x - 14;
-                    break;
-                }
-            }
-        }
+                if (max_ahead - row[x] >= 8.0) {
+                    int best_offset = 0;
+                    double best_diff = -1.0;
+                    for (int k = x; k + 4 < ahead_end; ++k) {
+                        const double diff = row[k + 4] - row[k];
+                        if (diff > best_diff) {
+                            best_diff = diff;
+                            best_offset = k - x;
+                        }
+                    }
+                    const int xp = x + best_offset + 2;
+                    const int b_start = std::max(20, xp - 120);
+                    const int b_end = std::max(25, xp - 3);
+                    const double b = slicePercentile(row, b_start, b_end, 0.15);
 
-        if (coarse < 100 || coarse >= width - 100) {
-            continue;
-        }
+                    std::vector<double> dark_devs;
+                    for (int k = b_start; k < b_end && k < w; ++k) {
+                        if (row[k] <= b + 5.0) {
+                            dark_devs.push_back(std::abs(row[k] - b));
+                        }
+                    }
+                    const double sigma = (dark_devs.size() > 4) ? (1.4826 * quantile(dark_devs, 0.50)) : 1.0;
 
-        // 局部自适应基准：外侧暗谷基准 b 与内侧晶圆表面基准 s
-        const int ext_start = std::max(0, coarse - 60);
-        const int ext_end = std::max(1, coarse - 10);
-        const int int_start = std::min(width - 1, coarse + 30);
-        const int int_end = std::min(width, coarse + 100);
+                    const double s_narrow = slicePercentile(row, xp, std::min(w - 20, xp + 35), 0.85);
+                    const double s_medium = slicePercentile(row, std::min(w - 30, xp + 10), std::min(w - 20, xp + 100), 0.75);
+                    const double s = std::max(s_narrow, s_medium);
 
-        if (int_end <= int_start || ext_end <= ext_start) {
-            continue;
-        }
-
-        std::vector<double> exterior(row.begin() + ext_start, row.begin() + ext_end);
-        std::vector<double> interior(row.begin() + int_start, row.begin() + int_end);
-        const double b = quantile(exterior, 0.30);
-        const double s = quantile(interior, 0.70);
-        if (s - b < 10.0 || s >= 254.0) {
-            continue;
-        }
-
-        std::vector<double> noise = exterior;
-        for (double& value : noise) {
-            value = std::abs(value - b);
-        }
-        const double sigma = 1.4826 * quantile(noise, 0.50);
-        const double threshold = b + 0.15 * (s - b);
-
-        if (threshold - b < 3.0 * sigma) {
-            continue;
-        }
-
-        const int search_start = std::max(0, coarse - 50);
-        const int search_end = std::min(width - 1, coarse + 30);
-        for (int x = search_start; x < search_end; ++x) {
-            if (row[x] <= threshold && row[x + 1] > threshold) {
-                const double denom = row[x + 1] - row[x];
-                if (denom > 1e-6) {
-                    const double subpixel = x + (threshold - row[x]) / denom;
-                    const double actual_x = scan_from_right ? (width - 1.0 - subpixel) : subpixel;
-                    points.emplace_back(actual_x, static_cast<double>(y));
-                    break;
+                    const double min_contrast = (b < 10.0) ? 6.0 : 12.0;
+                    if (b < 40.0 && (s - b) >= std::max(min_contrast, 4.0 * sigma) && s < 254.5) {
+                        const double th = b + 0.15 * (s - b);
+                        double sub_x = -1.0;
+                        const int k_start = std::min(w - 25, xp + 20);
+                        const int k_end = std::max(20, xp - 100);
+                        for (int k = k_start; k > k_end; --k) {
+                            if (row[k] <= th && row[k + 1] > th) {
+                                const double denom = row[k + 1] - row[k];
+                                if (denom > 1e-6) {
+                                    sub_x = static_cast<double>(k) + (th - row[k]) / denom;
+                                }
+                                break;
+                            }
+                        }
+                        if (sub_x >= 80.0 && sub_x <= static_cast<double>(w - 80)) {
+                            if (cands.empty() || (sub_x - cands.back()) > 80.0) {
+                                cands.push_back(sub_x);
+                                x = static_cast<int>(sub_x) + 80;
+                                continue;
+                            }
+                        }
+                    }
                 }
             }
         }
+        x += 8;
     }
-
-    if (filter) {
-        return filterEdge(points, height);
-    }
-    return points.size() >= 30;
 }
 
-bool detectEdge(const cv::Mat& image, int view, Points& points, bool filter = true, int density = 256) {
+// 跨行 2D 连续圆弧链聚类提取（支持同一视野分离内外双圆弧并剔除杂散短链）
+void extractCandidateArcs(
+    const cv::Mat& image,
+    int view_idx,
+    bool scan_from_right,
+    int density,
+    std::vector<Points>& valid_arcs
+) {
+    valid_arcs.clear();
     cv::Mat smooth;
     image.convertTo(smooth, CV_32F);
     cv::GaussianBlur(smooth, smooth, cv::Size(), 2.0);
 
     const int width = smooth.cols;
     const int height = smooth.rows;
+    const int margin = std::max(16, height / 32);
+    const int step = std::max(1, height / density);
+    const double max_dy = static_cast<double>(step) * 5.0;
 
-    // 自动采样图像左右边缘区域灰度，自适应探测黑场位于左侧还是右侧
-    const int check_margin = std::max(16, height / 32);
-    const int check_cols = std::min(64, width / 8);
-    std::vector<double> left_samples;
-    std::vector<double> right_samples;
-    left_samples.reserve(static_cast<size_t>((height - 2 * check_margin) / 8 * check_cols));
-    right_samples.reserve(static_cast<size_t>((height - 2 * check_margin) / 8 * check_cols));
+    std::vector<Points> chains;
+    std::vector<double> row(width);
+    std::vector<double> cands;
 
-    for (int y = check_margin; y < height - check_margin; y += 8) {
-        const float* ptr = smooth.ptr<float>(y);
-        for (int x = 0; x < check_cols; ++x) {
-            left_samples.push_back(ptr[x]);
-            right_samples.push_back(ptr[width - 1 - x]);
+    for (int y = margin; y < height - margin; y += step) {
+        const float* source = smooth.ptr<float>(y);
+        for (int x = 0; x < width; ++x) {
+            row[x] = source[scan_from_right ? (width - 1 - x) : x];
+        }
+        extractRowCandidates(row, cands);
+
+        for (double c : cands) {
+            const double actual_x = scan_from_right ? (static_cast<double>(width - 1) - c) : c;
+            int best_idx = -1;
+            double best_dist = 35.0 * std::max(1.0, static_cast<double>(step) / 16.0);
+
+            for (size_t idx = 0; idx < chains.size(); ++idx) {
+                const auto& ch = chains[idx];
+                const double last_x = ch.back().x;
+                const double last_y = ch.back().y;
+                const double dy = static_cast<double>(y) - last_y;
+                if (dy > 0.0 && dy <= max_dy) {
+                    double pred_x = last_x;
+                    if (ch.size() >= 3) {
+                        const double span_y = ch.back().y - ch[ch.size() - 3].y;
+                        if (span_y > 0.0) {
+                            const double dx_dy = (ch.back().x - ch[ch.size() - 3].x) / span_y;
+                            pred_x = last_x + dx_dy * dy;
+                        }
+                    }
+                    const double dist = std::abs(actual_x - pred_x);
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        best_idx = static_cast<int>(idx);
+                    }
+                }
+            }
+
+            if (best_idx >= 0) {
+                chains[static_cast<size_t>(best_idx)].emplace_back(actual_x, static_cast<double>(y));
+            } else {
+                Points new_chain;
+                new_chain.emplace_back(actual_x, static_cast<double>(y));
+                chains.push_back(std::move(new_chain));
+            }
         }
     }
 
-    const double left_median = quantile(left_samples, 0.50);
-    const double right_median = quantile(right_samples, 0.50);
-
-    // 默认或优先建议方向：若左侧明显较暗，则黑场在左侧（scan_from_right = false）；
-    // 若右侧明显较暗，则黑场在右侧（scan_from_right = true）；
-    // 若两侧差异不显著，则参考原入参 view < 2 作为初选建议
-    bool preferred_scan_from_right = (view < 2);
-    if (std::abs(right_median - left_median) >= 15.0) {
-        preferred_scan_from_right = (right_median < left_median);
-    }
-
-    // 1. 首选自适应方向尝试提取
-    Points cand_pts;
-    bool success = extractEdgeDirectional(smooth, preferred_scan_from_right, filter, density, cand_pts);
-
-    // 2. 自适应回退机制：若首选方向提取失败，自动切换为反向扫描重试，彻底免疫相机镜像
-    if (!success) {
-        Points fallback_pts;
-        bool fallback_success = extractEdgeDirectional(smooth, !preferred_scan_from_right, filter, density, fallback_pts);
-        if (fallback_success) {
-            points = std::move(fallback_pts);
-            return true;
+    for (auto& ch : chains) {
+        if (ch.size() >= 30) {
+            Points candidate = ch;
+            if (filterEdgeWithSlope(candidate, height, view_idx, true)) {
+                valid_arcs.push_back(std::move(candidate));
+            }
         }
-        return false;
     }
-
-    points = std::move(cand_pts);
-    return true;
 }
 
 template<size_t N>
 bool fitCircle(const std::array<Points, N>& groups, cv::Vec3d& circle) {
     size_t count = 0;
-    for (const auto& group : groups) count += group.size();
-    cv::Point2d origin;
     for (const auto& group : groups) {
-        cv::Point2d mean;
-        for (const auto& p : group) mean += p;
-        origin += mean * (1. / (N * group.size()));
+        if (group.empty()) {
+            return false;
+        }
+        count += group.size();
     }
-    cv::Mat a(static_cast<int>(count), 3, CV_64F), b(static_cast<int>(count), 1, CV_64F);
+    if (count < 30) {
+        return false;
+    }
+
+    cv::Point2d origin(0.0, 0.0);
+    for (const auto& group : groups) {
+        cv::Point2d mean(0.0, 0.0);
+        for (const auto& p : group) {
+            mean += p;
+        }
+        origin += mean * (1.0 / (static_cast<double>(N) * static_cast<double>(group.size())));
+    }
+
+    cv::Mat a(static_cast<int>(count), 3, CV_64F);
+    cv::Mat b(static_cast<int>(count), 1, CV_64F);
     int row = 0;
     for (const auto& group : groups) {
-        const double w = 1. / std::sqrt(static_cast<double>(group.size()));
+        const double w = 1.0 / std::sqrt(static_cast<double>(group.size()));
         for (const auto& point : group) {
             const cv::Point2d p = point - origin;
-            a.at<double>(row, 0) = 2. * p.x * w; a.at<double>(row, 1) = 2. * p.y * w;
-            a.at<double>(row, 2) = w; b.at<double>(row) = p.dot(p) * w; ++row;
+            a.at<double>(row, 0) = 2.0 * p.x * w;
+            a.at<double>(row, 1) = 2.0 * p.y * w;
+            a.at<double>(row, 2) = w;
+            b.at<double>(row, 0) = p.dot(p) * w;
+            ++row;
         }
     }
+
     cv::Mat initial;
-    if (!cv::solve(a, b, initial, cv::DECOMP_SVD)) return false;
-    const double cx = initial.at<double>(0), cy = initial.at<double>(1);
+    if (!cv::solve(a, b, initial, cv::DECOMP_SVD)) {
+        return false;
+    }
+    const double cx = initial.at<double>(0);
+    const double cy = initial.at<double>(1);
     const double r2 = initial.at<double>(2) + cx * cx + cy * cy;
-    if (!(r2 > 0.) || !std::isfinite(r2)) return false;
+    if (!(r2 > 0.0) || !std::isfinite(r2)) {
+        return false;
+    }
+
     circle = cv::Vec3d(cx, cy, std::sqrt(r2));
     bool converged = false;
     for (int iteration = 0; iteration < 30; ++iteration) {
         row = 0;
         for (const auto& group : groups) {
-            const double w = 1. / std::sqrt(static_cast<double>(group.size()));
+            const double w = 1.0 / std::sqrt(static_cast<double>(group.size()));
             for (const auto& point : group) {
                 const double x = circle[0] - (point.x - origin.x);
                 const double y = circle[1] - (point.y - origin.y);
                 const double d = std::hypot(x, y);
-                if (d < 1e-12 || !std::isfinite(d)) return false;
-                a.at<double>(row, 0) = x / d * w; a.at<double>(row, 1) = y / d * w;
-                a.at<double>(row, 2) = -w; b.at<double>(row) = (circle[2] - d) * w; ++row;
+                if (d < 1e-12 || !std::isfinite(d)) {
+                    return false;
+                }
+                a.at<double>(row, 0) = x / d * w;
+                a.at<double>(row, 1) = y / d * w;
+                a.at<double>(row, 2) = -w;
+                b.at<double>(row, 0) = (circle[2] - d) * w;
+                ++row;
             }
         }
         cv::Mat delta;
-        if (!cv::solve(a, b, delta, cv::DECOMP_SVD)) return false;
-        for (int j = 0; j < 3; ++j) circle[j] += delta.at<double>(j);
-        if (cv::norm(delta) < 1e-10) { converged = true; break; }
+        if (!cv::solve(a, b, delta, cv::DECOMP_SVD)) {
+            return false;
+        }
+        for (int j = 0; j < 3; ++j) {
+            circle[j] += delta.at<double>(j);
+        }
+        if (cv::norm(delta) < 1e-10) {
+            converged = true;
+            break;
+        }
     }
-    circle[0] += origin.x; circle[1] += origin.y;
+    circle[0] += origin.x;
+    circle[1] += origin.y;
     return converged && std::isfinite(circle[0]) && std::isfinite(circle[1]) &&
-        std::isfinite(circle[2]) && circle[2] > 0.;
+           std::isfinite(circle[2]) && circle[2] > 0.0;
 }
 
-cv::Point2d toWorld(const cv::Point2d& p, const double* stage, int width, int height, double scale, double sign_x = 1.0, double sign_y = 1.0) {
-    return {stage[0] + sign_x * (p.x - width * .5) * scale,
-            stage[1] - sign_y * (p.y - height * .5) * scale};
+cv::Point2d toWorld(const cv::Point2d& p, const double* stage, int width, int height, double scale) {
+    return {
+        stage[0] + (p.x - width * 0.5) * scale,
+        stage[1] - (p.y - height * 0.5) * scale
+    };
 }
 
-double notchAngle(const Points& edge, const double* stage, int width, int height,
-                  double scale, const cv::Vec3d& circle, double sign_x = 1.0, double sign_y = 1.0) {
-    std::vector<double> angles, depths, midpoints;
+// 多视野全局共圆一致性优选：按径向由外向内排序，自动分离去边环内圆弧并锁定真实晶圆外圆周
+template<size_t N>
+bool selectBestOuterArcs(
+    const std::array<std::vector<Points>, N>& view_arcs_world,
+    const double* stage_xy_mm,
+    std::array<Points, N>& selected,
+    cv::Vec3d& circle
+) {
+    double cx_approx = 0.0;
+    double cy_approx = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        cx_approx += stage_xy_mm[2 * i] * 0.25;
+        cy_approx += stage_xy_mm[2 * i + 1] * 0.25;
+    }
+
+    std::array<std::vector<std::pair<double, Points>>, N> sorted_arcs;
+    for (size_t i = 0; i < N; ++i) {
+        if (view_arcs_world[i].empty()) {
+            return false;
+        }
+        for (const auto& arc : view_arcs_world[i]) {
+            double sum_r = 0.0;
+            for (const auto& p : arc) {
+                sum_r += std::hypot(p.x - cx_approx, p.y - cy_approx);
+            }
+            const double mean_r = sum_r / static_cast<double>(arc.size());
+            sorted_arcs[i].emplace_back(mean_r, arc);
+        }
+        std::sort(
+            sorted_arcs[i].begin(),
+            sorted_arcs[i].end(),
+            [](const std::pair<double, Points>& a, const std::pair<double, Points>& b) {
+                return a.first > b.first;
+            }
+        );
+        selected[i] = sorted_arcs[i][0].second;
+    }
+
+    if (!fitCircle(selected, circle)) {
+        return false;
+    }
+
+    for (int pass = 0; pass < 2; ++pass) {
+        for (size_t i = 0; i < N; ++i) {
+            if (sorted_arcs[i].size() > 1) {
+                Points best_arc = selected[i];
+                std::vector<double> errs;
+                for (const auto& p : best_arc) {
+                    errs.push_back(std::abs(std::hypot(p.x - circle[0], p.y - circle[1]) - circle[2]));
+                }
+                double best_err = quantile(errs, 0.50);
+
+                for (const auto& item : sorted_arcs[i]) {
+                    std::vector<double> cand_errs;
+                    for (const auto& p : item.second) {
+                        cand_errs.push_back(std::abs(std::hypot(p.x - circle[0], p.y - circle[1]) - circle[2]));
+                    }
+                    const double err = quantile(cand_errs, 0.50);
+                    if (err < best_err * 0.5 && err < 0.2) {
+                        best_err = err;
+                        best_arc = item.second;
+                    }
+                }
+                selected[i] = std::move(best_arc);
+            }
+        }
+        if (!fitCircle(selected, circle)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+double notchAngle(
+    const Points& edge,
+    const double* stage,
+    int width,
+    int height,
+    double scale,
+    const cv::Vec3d& circle
+) {
+    std::vector<double> angles;
+    std::vector<double> depths;
+    std::vector<double> midpoints;
+    angles.reserve(edge.size());
+    depths.reserve(edge.size());
+
     for (const auto& p : edge) {
-        const auto q = toWorld(p, stage, width, height, scale, sign_x, sign_y);
-        angles.push_back(std::atan2(q.x - circle[0], circle[1] - q.y) * 180. / CV_PI);
+        const auto q = toWorld(p, stage, width, height, scale);
+        angles.push_back(std::atan2(q.x - circle[0], circle[1] - q.y) * 180.0 / CV_PI);
         depths.push_back(circle[2] - std::hypot(q.x - circle[0], q.y - circle[1]));
     }
-    // shortcut: depth sections suit the current ~1 mm notch; smaller notches return NaN.
+
+    // 在 0.3mm ~ 1.0mm 的等深截面上计算左右交点中位角
     for (int section = 3; section <= 10; ++section) {
-        const double level = section * .1;
+        const double level = section * 0.1;
         std::vector<double> crossings;
         for (size_t j = 0; j + 1 < edge.size(); ++j) {
-            if ((depths[j] <= level && depths[j+1] > level) ||
-                (depths[j] > level && depths[j+1] <= level)) {
-                // Do not bridge missing edge detections across a reflection or particle.
-                if (std::abs(edge[j+1].x - edge[j].x) > 8. * std::max(1, width / 1024)) {
+            if ((depths[j] <= level && depths[j + 1] > level) ||
+                (depths[j] > level && depths[j + 1] <= level)) {
+                if (std::abs(edge[j + 1].x - edge[j].x) > 8.0 * std::max(1, width / 1024)) {
                     continue;
                 }
-                crossings.push_back(angles[j] + (level - depths[j]) /
-                    (depths[j+1] - depths[j]) * (angles[j+1] - angles[j]));
+                crossings.push_back(
+                    angles[j] + (level - depths[j]) / (depths[j + 1] - depths[j]) * (angles[j + 1] - angles[j])
+                );
             }
         }
         if (crossings.size() == 2 && std::isfinite(crossings[0]) && std::isfinite(crossings[1])) {
-            midpoints.push_back((crossings[0] + crossings[1]) * .5);
+            midpoints.push_back((crossings[0] + crossings[1]) * 0.5);
         }
     }
-    if (midpoints.size() < 3) return std::numeric_limits<double>::quiet_NaN();
+    if (midpoints.size() < 3) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     std::sort(midpoints.begin(), midpoints.end());
     const size_t n = midpoints.size();
-    return (midpoints[(n-1)/2] + midpoints[n/2]) * .5;
+    return (midpoints[(n - 1) / 2] + midpoints[n / 2]) * 0.5;
 }
 } // namespace
 
 extern "C" WAFER_API int Wafer_FindFourViewEdgeCircle(
-    const unsigned char** image_buffers, const double* stage_xy_mm,
-    int width, int height, double pixel_size_um, WaferEdgeCircleResult* result) {
-    if (!result) return WAFER_ERR_INVALID_PARAM;
+    const unsigned char** image_buffers,
+    const double* stage_xy_mm,
+    int width,
+    int height,
+    double pixel_size_um,
+    WaferEdgeCircleResult* result
+) {
+    if (!result) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
     const double nan = std::numeric_limits<double>::quiet_NaN();
     *result = {nan, nan, nan, nan, nan};
-    if (!image_buffers || !stage_xy_mm || width < 512 || height < 256 ||
-        !std::isfinite(pixel_size_um) || pixel_size_um <= 0. ||
-        static_cast<size_t>(width) > static_cast<size_t>(std::numeric_limits<int>::max()) / height)
-        return WAFER_ERR_INVALID_PARAM;
-    for (int i = 0; i < 4; ++i) {
-        if (!image_buffers[i] || !std::isfinite(stage_xy_mm[2*i]) || !std::isfinite(stage_xy_mm[2*i+1]))
-            return WAFER_ERR_INVALID_PARAM;
-    }
-    // Fixed acquisition quadrants are part of this six-parameter ABI.
-    if (!(stage_xy_mm[0] > stage_xy_mm[4] && stage_xy_mm[2] > stage_xy_mm[6] &&
-          stage_xy_mm[1] > stage_xy_mm[3] && stage_xy_mm[5] > stage_xy_mm[7]))
-        return WAFER_ERR_INVALID_PARAM;
-    try {
-        std::array<Points, 4> groups;
-        const double scale = pixel_size_um / 1000.;
 
-        // 自适应判断四视野相机安装镜像方向
-        // View 0 采图位于第一象限 (+X, +Y)，晶圆内侧在 (-X, -Y) 侧
-        // 若图像左侧比右侧亮，则向左为晶圆内侧 (sign_x = 1.0)；反之为镜像倒装 (sign_x = -1.0)
-        double sign_x = 1.0;
-        double sign_y = 1.0;
-        {
-            cv::Mat view0(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[0]));
-            const int check_margin = std::max(16, height / 32);
-            const int check_cols = std::min(64, width / 8);
-            std::vector<double> left_s, right_s, top_s, bottom_s;
-            for (int y = check_margin; y < height - check_margin; y += 8) {
-                const uint8_t* ptr = view0.ptr<uint8_t>(y);
-                for (int x = 0; x < check_cols; ++x) {
-                    left_s.push_back(ptr[x]);
-                    right_s.push_back(ptr[width - 1 - x]);
-                }
-            }
-            if (quantile(right_s, 0.5) > quantile(left_s, 0.5) + 5.0) {
-                sign_x = -1.0;
-            }
-            for (int x = check_margin; x < width - check_margin; x += 8) {
-                for (int y = 0; y < check_cols; ++y) {
-                    top_s.push_back(view0.at<uint8_t>(y, x));
-                    bottom_s.push_back(view0.at<uint8_t>(height - 1 - y, x));
-                }
-            }
-            if (quantile(top_s, 0.5) > quantile(bottom_s, 0.5) + 5.0) {
-                sign_y = -1.0;
-            }
+    if (!image_buffers || !stage_xy_mm || width < 512 || height < 256 ||
+        !std::isfinite(pixel_size_um) || pixel_size_um <= 0.0 ||
+        static_cast<size_t>(width) > static_cast<size_t>(std::numeric_limits<int>::max()) / height) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (!image_buffers[i] || !std::isfinite(stage_xy_mm[2 * i]) || !std::isfinite(stage_xy_mm[2 * i + 1])) {
+            return WAFER_ERR_INVALID_PARAM;
         }
+    }
+    if (!(stage_xy_mm[0] > stage_xy_mm[4] && stage_xy_mm[2] > stage_xy_mm[6] &&
+          stage_xy_mm[1] > stage_xy_mm[3] && stage_xy_mm[5] > stage_xy_mm[7])) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
+
+    try {
+        const double scale = pixel_size_um / 1000.0;
+        std::array<std::vector<Points>, 4> view_arcs_world;
 
         for (int i = 0; i < 4; ++i) {
             cv::Mat input(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i]));
-            if (!detectEdge(input, i, groups[i])) {
+            const bool scan_from_right = (i < 2);
+            std::vector<Points> arcs;
+            extractCandidateArcs(input, i, scan_from_right, 256, arcs);
+            if (arcs.empty()) {
+                extractCandidateArcs(input, i, !scan_from_right, 256, arcs);
+            }
+            if (arcs.empty()) {
                 return WAFER_ERR_FEATURE_NOT_FOUND;
             }
-            for (auto& p : groups[i]) {
-                p = toWorld(p, stage_xy_mm + 2 * i, width, height, scale, sign_x, sign_y);
+            for (const auto& arc : arcs) {
+                Points world_pts;
+                world_pts.reserve(arc.size());
+                for (const auto& p : arc) {
+                    world_pts.push_back(toWorld(p, stage_xy_mm + 2 * i, width, height, scale));
+                }
+                view_arcs_world[i].push_back(std::move(world_pts));
             }
         }
+
+        std::array<Points, 4> groups;
         cv::Vec3d circle;
-        if (!fitCircle(groups, circle)) {
+        if (!selectBestOuterArcs(view_arcs_world, stage_xy_mm, groups, circle)) {
             return WAFER_ERR_FITTING_FAILED;
         }
 
-        // 剔除偏离粗圆超过 1.5mm 的离群杂斑点（如镜头暗角、机械反光）
         for (int i = 0; i < 4; ++i) {
             Points clean_group;
             clean_group.reserve(groups[i].size());
@@ -409,20 +563,24 @@ extern "C" WAFER_API int Wafer_FindFourViewEdgeCircle(
         if (!fitCircle(groups, circle)) {
             return WAFER_ERR_FITTING_FAILED;
         }
-        double mse = 0., maximum = 0.;
+
+        double mse = 0.0;
+        double maximum = 0.0;
         for (const auto& group : groups) {
-            double sum = 0.;
+            double sum = 0.0;
             for (const auto& p : group) {
                 const double e = std::hypot(p.x - circle[0], p.y - circle[1]) - circle[2];
-                sum += e * e; maximum = std::max(maximum, std::abs(e));
+                sum += e * e;
+                maximum = std::max(maximum, std::abs(e));
             }
-            mse += sum / (4. * group.size());
+            mse += sum / (4.0 * static_cast<double>(group.size()));
         }
-        const double rms = std::sqrt(mse) * 1000.;
-        if (!std::isfinite(rms) || rms > 100. * pixel_size_um) {
+        const double rms = std::sqrt(mse) * 1000.0;
+        if (!std::isfinite(rms) || rms > 100.0 * pixel_size_um) {
             return WAFER_ERR_FITTING_FAILED;
         }
-        *result = {circle[0], circle[1], circle[2], rms, maximum * 1000.};
+
+        *result = {circle[0], circle[1], circle[2], rms, maximum * 1000.0};
         return WAFER_SUCCESS;
     } catch (const cv::Exception&) {
         return WAFER_ERR_UNKNOWN;
@@ -432,85 +590,73 @@ extern "C" WAFER_API int Wafer_FindFourViewEdgeCircle(
 }
 
 extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
-    const unsigned char** image_buffers, const double* stage_xy_mm,
-    int width, int height, double pixel_size_um, WaferEightViewEdgeCircleResult* result) {
-    if (!result) return WAFER_ERR_INVALID_PARAM;
+    const unsigned char** image_buffers,
+    const double* stage_xy_mm,
+    int width,
+    int height,
+    double pixel_size_um,
+    WaferEightViewEdgeCircleResult* result
+) {
+    if (!result) {
+        return WAFER_ERR_INVALID_PARAM;
+    }
     const double nan = std::numeric_limits<double>::quiet_NaN();
     *result = {nan, nan, nan, nan, nan, nan};
+
     if (!image_buffers || !stage_xy_mm || width < 512 || height < 512 ||
-        !std::isfinite(pixel_size_um) || pixel_size_um <= 0. ||
-        static_cast<size_t>(width) > static_cast<size_t>(std::numeric_limits<int>::max()) / height)
+        !std::isfinite(pixel_size_um) || pixel_size_um <= 0.0 ||
+        static_cast<size_t>(width) > static_cast<size_t>(std::numeric_limits<int>::max()) / height) {
         return WAFER_ERR_INVALID_PARAM;
-    for (int i = 0; i < 8; ++i)
-        if (!image_buffers[i] || !std::isfinite(stage_xy_mm[2*i]) || !std::isfinite(stage_xy_mm[2*i+1]))
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (!image_buffers[i] || !std::isfinite(stage_xy_mm[2 * i]) || !std::isfinite(stage_xy_mm[2 * i + 1])) {
             return WAFER_ERR_INVALID_PARAM;
+        }
+    }
     if (!(stage_xy_mm[0] > stage_xy_mm[4] && stage_xy_mm[2] > stage_xy_mm[6] &&
           stage_xy_mm[1] > stage_xy_mm[3] && stage_xy_mm[5] > stage_xy_mm[7] &&
-          stage_xy_mm[8] > stage_xy_mm[10] && stage_xy_mm[13] > stage_xy_mm[15]))
+          stage_xy_mm[8] > stage_xy_mm[10] && stage_xy_mm[13] > stage_xy_mm[15])) {
         return WAFER_ERR_INVALID_PARAM;
-    try {
-        const double scale = pixel_size_um / 1000.;
+    }
 
-        // 自适应判断八视野相机在 X / Y 轴的安装镜像方向
-        // View 4 为 +X 视野：晶圆位于内侧 (-X 侧)
-        // 正常安装下：左侧为晶圆亮区，右侧为黑场 (sign_x = 1.0)
-        // 倒装/镜像下：右侧为晶圆亮区，左侧为黑场 (sign_x = -1.0)
-        double sign_x = 1.0;
-        {
-            cv::Mat view4(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[4]));
-            const int check_margin = std::max(16, height / 32);
-            const int check_cols = std::min(64, width / 8);
-            std::vector<double> left_s, right_s;
-            for (int y = check_margin; y < height - check_margin; y += 8) {
-                const uint8_t* ptr = view4.ptr<uint8_t>(y);
-                for (int x = 0; x < check_cols; ++x) {
-                    left_s.push_back(ptr[x]);
-                    right_s.push_back(ptr[width - 1 - x]);
+    try {
+        const double scale = pixel_size_um / 1000.0;
+        std::array<std::vector<Points>, 7> view_arcs_world;
+
+        for (int i = 0; i < 7; ++i) {
+            cv::Mat input(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i]));
+            cv::Mat scan;
+            if (i == 6) {
+                cv::transpose(input, scan);
+            } else {
+                scan = input;
+            }
+            const bool scan_from_right = (i < 2 || i == 4);
+            std::vector<Points> arcs;
+            extractCandidateArcs(scan, i, scan_from_right, 256, arcs);
+            if (arcs.empty()) {
+                extractCandidateArcs(scan, i, !scan_from_right, 256, arcs);
+            }
+            if (arcs.empty()) {
+                return WAFER_ERR_FEATURE_NOT_FOUND;
+            }
+            for (const auto& arc : arcs) {
+                Points world_pts;
+                world_pts.reserve(arc.size());
+                for (const auto& p : arc) {
+                    const cv::Point2d orig_p = (i == 6) ? cv::Point2d(p.y, p.x) : p;
+                    world_pts.push_back(toWorld(orig_p, stage_xy_mm + 2 * i, width, height, scale));
                 }
-            }
-            if (quantile(right_s, 0.5) > quantile(left_s, 0.5) + 5.0) {
-                sign_x = -1.0;
-            }
-        }
-        // View 7 为 -Y 视野：晶圆位于内侧 (+Y 侧)
-        // 正常安装下：上方为晶圆亮区，下方为黑场 (sign_y = 1.0)
-        // 倒装/镜像下：下方为晶圆亮区，上方为黑场 (sign_y = -1.0)
-        double sign_y = 1.0;
-        {
-            cv::Mat view7(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[7]));
-            const int check_margin = std::max(16, width / 32);
-            const int check_rows = std::min(64, height / 8);
-            std::vector<double> top_s, bottom_s;
-            for (int x = check_margin; x < width - check_margin; x += 8) {
-                for (int y = 0; y < check_rows; ++y) {
-                    top_s.push_back(view7.at<uint8_t>(y, x));
-                    bottom_s.push_back(view7.at<uint8_t>(height - 1 - y, x));
-                }
-            }
-            if (quantile(bottom_s, 0.5) > quantile(top_s, 0.5) + 5.0) {
-                sign_y = -1.0;
+                view_arcs_world[i].push_back(std::move(world_pts));
             }
         }
 
         std::array<Points, 7> seedGroups;
-        for (int i = 0; i < 7; ++i) {
-            cv::Mat input(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[i]));
-            cv::Mat scan;
-            if (i == 6) cv::transpose(input, scan);
-            else scan = input;
-            const int direction = (i < 2 || i == 4) ? 0 : 2;
-            if (!detectEdge(scan, direction, seedGroups[i])) return WAFER_ERR_FEATURE_NOT_FOUND;
-            for (auto& p : seedGroups[i]) {
-                if (i == 6) std::swap(p.x, p.y);
-                p = toWorld(p, stage_xy_mm + 2*i, width, height, scale, sign_x, sign_y);
-            }
-        }
         cv::Vec3d circle;
-        if (!fitCircle(seedGroups, circle)) {
+        if (!selectBestOuterArcs(view_arcs_world, stage_xy_mm, seedGroups, circle)) {
             return WAFER_ERR_FITTING_FAILED;
         }
 
-        // 剔除各视野中偏离初解算粗圆超过 1.5mm 的离群杂斑点（如暗角渐晕、机械台反射）
         for (int i = 0; i < 7; ++i) {
             Points clean_group;
             clean_group.reserve(seedGroups[i].size());
@@ -529,41 +675,122 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
             return WAFER_ERR_FITTING_FAILED;
         }
 
-        cv::Mat input(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[7])), scan;
-        cv::transpose(input, scan);
-        Points raw, clean_raw, normal;
-        if (!detectEdge(scan, 0, raw, false, 1024)) {
-            return WAFER_ERR_FEATURE_NOT_FOUND;
-        }
+        // 第 8 视野（View 7，位于 -Y 正交方向，含 Notch 缺口）：
+        // 利用前 7 视野求出的高精度基准圆施加物理深度窗 [-0.25, +1.35] mm，并通过连续链聚类提取纯净轮廓
+        cv::Mat input7(height, width, CV_8UC1, const_cast<unsigned char*>(image_buffers[7]));
+        cv::Mat scan7;
+        cv::transpose(input7, scan7);
+        cv::Mat smooth7;
+        scan7.convertTo(smooth7, CV_32F);
+        cv::GaussianBlur(smooth7, smooth7, cv::Size(), 2.0);
 
-        // 剥离 View 7 底座反射等径向离群点，保留完整的 Notch 凹槽（~1mm 深）及外圆弧
-        for (auto& p : raw) {
-            std::swap(p.x, p.y);
-            const auto q = toWorld(p, stage_xy_mm + 14, width, height, scale, sign_x, sign_y);
-            const double d = std::hypot(q.x - circle[0], q.y - circle[1]);
-            if (std::abs(d - circle[2]) < 1.5) {
-                clean_raw.push_back(p);
+        const int sh = smooth7.rows;
+        const int sw = smooth7.cols;
+        const int margin7 = std::max(16, sh / 32);
+        const int step7 = std::max(1, sh / 1024);
+        const double max_dy7 = static_cast<double>(step7) * 12.0;
+
+        std::vector<Points> chains7;
+        std::vector<double> row7(sw);
+        std::vector<double> cands7;
+
+        for (int y = margin7; y < sh - margin7; y += step7) {
+            const float* src = smooth7.ptr<float>(y);
+            for (int x = 0; x < sw; ++x) {
+                row7[x] = src[sw - 1 - x];
+            }
+            extractRowCandidates(row7, cands7);
+
+            for (double c : cands7) {
+                const double actual_x = static_cast<double>(sw - 1) - c;
+                const cv::Point2d orig_p(static_cast<double>(y), actual_x);
+                const cv::Point2d q = toWorld(orig_p, stage_xy_mm + 14, width, height, scale);
+                const double depth = circle[2] - std::hypot(q.x - circle[0], q.y - circle[1]);
+
+                if (depth >= -0.25 && depth <= 1.35) {
+                    int best_idx = -1;
+                    double best_dist = 45.0 * std::max(1.0, static_cast<double>(step7) / 8.0);
+                    for (size_t idx = 0; idx < chains7.size(); ++idx) {
+                        const auto& ch = chains7[idx];
+                        const double last_x = ch.back().x;
+                        const double last_y = ch.back().y;
+                        const double dy = static_cast<double>(y) - last_y;
+                        if (dy > 0.0 && dy <= max_dy7) {
+                            double pred_x = last_x;
+                            if (ch.size() >= 3) {
+                                const double span_y = ch.back().y - ch[ch.size() - 3].y;
+                                if (span_y > 0.0) {
+                                    const double dx_dy = (ch.back().x - ch[ch.size() - 3].x) / span_y;
+                                    pred_x = last_x + dx_dy * dy;
+                                }
+                            }
+                            const double dist = std::abs(actual_x - pred_x);
+                            if (dist < best_dist) {
+                                best_dist = dist;
+                                best_idx = static_cast<int>(idx);
+                            }
+                        }
+                    }
+                    if (best_idx >= 0) {
+                        chains7[static_cast<size_t>(best_idx)].emplace_back(actual_x, static_cast<double>(y));
+                    } else {
+                        Points new_chain;
+                        new_chain.emplace_back(actual_x, static_cast<double>(y));
+                        chains7.push_back(std::move(new_chain));
+                    }
+                }
             }
         }
-        if (clean_raw.size() < 30) {
+
+        // 汇总长度 >= 15 的有效连续轮廓链并按原图横坐标排序（自动剔除 Notch 内部孤立微尘噪点）
+        Points raw;
+        for (const auto& ch : chains7) {
+            if (ch.size() >= 15) {
+                for (const auto& pt : ch) {
+                    const double orig_x = pt.y;
+                    const double orig_y = pt.x;
+                    bool exists = false;
+                    for (const auto& existing : raw) {
+                        if (std::abs(existing.x - orig_x) < 1e-6) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists) {
+                        raw.emplace_back(orig_x, orig_y);
+                    }
+                }
+            }
+        }
+        std::sort(
+            raw.begin(),
+            raw.end(),
+            [](const cv::Point2d& a, const cv::Point2d& b) {
+                return a.x < b.x;
+            }
+        );
+
+        if (raw.size() < 30) {
             return WAFER_ERR_FEATURE_NOT_FOUND;
         }
-        raw = std::move(clean_raw);
 
-        double left = width, right = -1.;
+        double left = static_cast<double>(width);
+        double right = -1.0;
         for (const auto& p : raw) {
-            const auto q = toWorld(p, stage_xy_mm + 14, width, height, scale, sign_x, sign_y);
-            if (circle[2] - std::hypot(q.x - circle[0], q.y - circle[1]) > std::max(.1, 10. * scale)) {
+            const auto q = toWorld(p, stage_xy_mm + 14, width, height, scale);
+            if (circle[2] - std::hypot(q.x - circle[0], q.y - circle[1]) > std::max(0.1, 10.0 * scale)) {
                 left = std::min(left, p.x);
                 right = std::max(right, p.x);
             }
         }
+
+        Points normal;
         for (const auto& p : raw) {
-            if (right < 0. || p.x < left - 60. || p.x > right + 60.) {
+            if (right < 0.0 || p.x < left - 60.0 || p.x > right + 60.0) {
                 normal.emplace_back(p.y, p.x);
             }
         }
-        if (!filterEdge(normal, width)) {
+        if (!filterEdgeWithSlope(normal, width, 7, true)) {
             return WAFER_ERR_FEATURE_NOT_FOUND;
         }
 
@@ -572,28 +799,29 @@ extern "C" WAFER_API int Wafer_FindEightViewEdgeCircle(
             groups[i] = std::move(seedGroups[i]);
         }
         for (const auto& p : normal) {
-            groups[7].push_back(toWorld({p.y, p.x}, stage_xy_mm + 14, width, height, scale, sign_x, sign_y));
+            groups[7].push_back(toWorld({p.y, p.x}, stage_xy_mm + 14, width, height, scale));
         }
         if (!fitCircle(groups, circle)) {
             return WAFER_ERR_FITTING_FAILED;
         }
 
-        double mse = 0., maximum = 0.;
+        double mse = 0.0;
+        double maximum = 0.0;
         for (const auto& group : groups) {
-            double sum = 0.;
+            double sum = 0.0;
             for (const auto& p : group) {
                 const double e = std::hypot(p.x - circle[0], p.y - circle[1]) - circle[2];
                 sum += e * e;
                 maximum = std::max(maximum, std::abs(e));
             }
-            mse += sum / (8. * group.size());
+            mse += sum / (8.0 * static_cast<double>(group.size()));
         }
-        const double rms = std::sqrt(mse) * 1000.;
-        if (!std::isfinite(rms) || rms > 100. * pixel_size_um) {
+        const double rms = std::sqrt(mse) * 1000.0;
+        if (!std::isfinite(rms) || rms > 100.0 * pixel_size_um) {
             return WAFER_ERR_FITTING_FAILED;
         }
-        const double angle = right < 0. ? nan : notchAngle(raw, stage_xy_mm + 14, width, height, scale, circle, sign_x, sign_y);
-        *result = {circle[0], circle[1], circle[2], rms, maximum * 1000., angle};
+        const double angle = (right < 0.0) ? nan : notchAngle(raw, stage_xy_mm + 14, width, height, scale, circle);
+        *result = {circle[0], circle[1], circle[2], rms, maximum * 1000.0, angle};
         return WAFER_SUCCESS;
     } catch (...) {
         return WAFER_ERR_UNKNOWN;

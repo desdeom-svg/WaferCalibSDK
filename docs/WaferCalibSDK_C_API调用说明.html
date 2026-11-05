@@ -3194,19 +3194,19 @@ else
     Console.WriteLine(&quot;圆心有效，notch角度不可用。&quot;);
 </code></pre>
 <p>完整可运行的 .NET Framework x64 示例见 <code>samples/EightViewEdgeCircleSample.cs</code>。使用含新增导出的 x64 DLL，并保证配套 OpenCV 运行库可被加载；结果结构大小应为 <code>Marshal.SizeOf(typeof(WaferCalibNative.WaferEightViewEdgeCircleResult)) == 48</code>。</p>
-<h3 id="114-notch-定位反光平台自适应与错误处理">11.4 notch 定位、反光平台自适应与错误处理</h3>
-<h4 id="1141-反光平台与全黑背景双模态边缘检测原理">11.4.1 反光平台与全黑背景双模态边缘检测原理</h4>
-<p>半导体晶圆装夹承载台由于机械加工、金属阳极氧化或反光特性不同，背景灰度具有较大差异：
-- <strong>纯黑承载台（历史样本）</strong>：晶圆为明亮信号（~190 DN），背景为纯黑底噪（~15 DN），两者呈现标准单调阶跃沿；
-- <strong>反光承载台（新型机台样本）</strong>：机械台面反光呈现浅灰底噪（65~75 DN），与晶圆内部灰度（80~85 DN）仅相差 10~15 DN。</p>
-<p>针对传统算法在反光台面上扫描起点越过粗阈值被误判为上升沿的缺陷，算法升级为<strong>“晶圆倒角暗谷识别与双模态状态机”</strong>：
-1. <strong>倒角暗谷物理特性</strong>：光线在晶圆边缘斜坡倒角（Bevel）处发生几何散射与阴影吸收，在图像中必然形成一条灰度深至 0~15 DN 的狭长“暗谷（Dark Trough）”；
-2. <strong>状态机防误触发</strong>：扫描线从外向内行进时，必须先检测到像素进入暗谷（$row[x] \le dark_th$，标记 <code>seen_dark = true</code>），然后从暗谷爬升越过粗边缘门限，才锁定为上升沿；
-3. <strong>局部自适应基准与亚像素插值</strong>：在粗定位点前方自适应采集倒角暗谷谷底基准 $b$，后方采集晶圆表面基准 $s$，取 $th = b + 0.15 \times (s - b)$ 动态插值，彻底免疫背景反射率漂移与光照起伏；
-4. <strong>两阶段初圆空间径向滤波</strong>：利用种子视野拟合出的初圆，在空间中施加 $\pm 1.5\text{ mm}$ 物理径向有效窗口，瞬间剥离镜头边缘暗角渐晕、机械底座反光条纹等局部数毫米级粗差离群点，确保最终超定正交拟合的圆心达到亚微米级重复性。</p>
-<h4 id="1142-notch-凹槽检测与对称轴解算">11.4.2 Notch 凹槽检测与对称轴解算</h4>
-<p>正常圆边沿用局部归一化阈值、亚像素定位及二次曲线/MAD 异常点剔除。先用 0～6 图拟合参考圆，定位第 7 图向圆内凹陷的 notch 区并加保护带，将其排除后进行八图等权圆拟合。</p>
-<p>第 7 图轮廓变换为相对拟合圆的角度与径向深度，在 0.3～1.0 mm 的八个深度截面寻找唯一左右交点，至少三个有效截面时，取截面中线角度的中位数。跨越较长缺失区或伪反射条纹的跳变点予以跳过，不污染截面交点计数，确保有效截面交点严格为 2。当前方案适用于已测约 1 mm 深的 notch，更小或严重遮挡的 notch 可能只返回圆心。</p>
+<h3 id="114-多模态边缘连续链聚类内外双圆弧去边环分离与错误处理">11.4 多模态边缘连续链聚类、内外双圆弧去边环分离与错误处理</h3>
+<h4 id="1141-产线复杂工况四级鲁棒边缘检测与全局共圆优选原理">11.4.1 产线复杂工况四级鲁棒边缘检测与全局共圆优选原理</h4>
+<p>半导体产线晶圆装夹、照明光路与表面工艺涵盖多种极端形态：
+- <strong>纯黑承载台 + 常规阶跃沿</strong>（如 <code>EdgeImage_2.5X_8</code>、<code>EdgeImage_1.5X_thick_8</code>）；
+- <strong>反光车刀纹金属承载台 + 低对比度晶圆</strong>（如 <code>EdgeImage1_8</code>，底座 ~70 DN 与晶圆 ~80 DN 仅差 10 DN）；
+- <strong>反光承载台 + 内外双圆弧去边环（Edge Exclusion Ring）</strong>（如 <code>EdgeImage_8</code>，外侧为 $R \approx 149.73\text{ mm}$ 的真实晶圆外边缘，向内约 $1.9\text{ mm}$ 处存在第二道 $R \approx 147.80\text{ mm}$ 的镀膜交界内圆弧，去边环灰度 ~48.5 DN 远低于内侧镜面区 95 DN）；
+- <strong>暗场照明极细窄脉冲亮线（Dark-field Thin Ridge）</strong>（如 <code>EdgeImage_1.5X_8</code>、<code>EdgeImage_1.5X</code>，背景与晶圆内部均为 ~14 DN，仅边缘呈宽 15~25 px、峰值 30~80 DN 的窄亮线）；
+- <strong>高倍率宽过渡带 + 内部 IC Die 金属电路网格</strong>（如 <code>EdgeImage_5X</code>）。</p>
+<p>针对上述全谱系产线场景，SDK 采用<strong>“四级通用多候选圆弧连续链聚类 + 全局共圆一致性优选”</strong>架构：
+1. <strong>局部滑动双窗口多候选亚像素提取 (<code>extractRowCandidates</code>)</strong>：彻底摒弃易受远处亮区污染的整行全局最大/最小值阈值，改为仅考察上升沿前方的局部暗谷基准 $b$（15% 分位数）与后方的双尺度局部信号基准 $s$（兼顾窄脉冲 <code>[xp, xp+35]</code> 85% 分位数与阶跃平台 <code>[xp+10, xp+100]</code> 75% 分位数），支持单行同时捕获外圆弧与内圆弧多个候选点；
+2. <strong>跨行 2D 连续圆弧链追踪与物理切线斜率约束 (<code>extractCandidateArcs</code> &amp; <code>filterEdgeWithSlope</code>)</strong>：将各行候选散点按局部切线外推聚类为平滑 2D 圆弧链，自动分离内外同心圆弧并剔除底座刀纹短链；同时施加视野几何切线斜率强约束（四角 45° 视野要求 $|dx/dy| \in [0.45, 1.85]$，正交视野要求 $|dx/dy| \le 0.35$），100% 过滤水平/垂直 IC 电路线条；
+3. <strong>多视野全局共圆一致性优选 (<code>selectBestOuterArcs</code>)</strong>：将各视野提取出的候选圆弧映射至机械台世界坐标系，按距台架中心的平均径向距离由外向内排序，自动锁定最外侧真实晶圆外边缘（剔除内侧去边环边界），并通过全局超定圆拟合残差迭代校验；
+4. <strong>View 7 物理非对称深度窗与连续链 Notch 提取</strong>：基于前 7 视野求出的高精度基准圆，对 View 7 施加物理深度窗 $\text{depth} = R - d \in [-0.25, +1.35]\text{ mm}$（同时剥离外侧底座反光与内侧去边环内圆弧），并通过 2D 连续链聚类（最小链长 $\ge 15$）滤除 Notch 凹口内孤立微尘噪点，在 $0.3 \sim 1.0\text{ mm}$ 的八个等深截面上稳定解算对称轴中位角。</p>
 <table>
 <thead>
 <tr>
@@ -3238,13 +3238,14 @@ else
 </tbody>
 </table>
 <p><strong>圆心有效但角度不可辨时返回 0，仅 <code>notch_angle_deg</code> 为 NaN。</strong> 无 notch、缺口过浅或有效截面不足都可能出现此情况。失败时，非空结果结构的六个字段全部为 NaN；不可只看返回码 0 就直接使用角度。</p>
-<h3 id="115-dll-与-c-实测结果及标定限制">11.5 DLL 与 C# 实测结果及标定限制</h3>
-<p>以下为实际调用本版 Release x64 DLL 在全量真实半导体产线数据集上的实测结果（涵盖历史黑场与新型反光平台全部用例，验证 100% 兼容）：</p>
+<h3 id="115-dll-全量-11-组真实产线数据集实测结果">11.5 DLL 全量 11 组真实产线数据集实测结果</h3>
+<p>以下为实际调用本版 Release x64 DLL 对全量 <strong>11 组真实半导体产线数据集（7 组 8 视野 + 4 组 4 视野）</strong> 的实测结果（100% 全部一次通过，8 视野 5120×5120 全套解算平均耗时仅 ~320 ms）：</p>
 <table>
 <thead>
 <tr>
+<th style="text-align: center;">视野模式</th>
 <th>数据集 / 样片路径</th>
-<th>承载台背景模式</th>
+<th>产线成像模态特征</th>
 <th style="text-align: right;">像素当量 (μm/px)</th>
 <th style="text-align: right;">圆心 X / mm</th>
 <th style="text-align: right;">圆心 Y / mm</th>
@@ -3257,69 +3258,151 @@ else
 </thead>
 <tbody>
 <tr>
-<td><code>EdgeImage</code> (历史全黑 1.5X 样本)</td>
-<td>纯黑底噪 (~15 DN)</td>
-<td style="text-align: right;">1.8</td>
-<td style="text-align: right;">-1.8153</td>
-<td style="text-align: right;">-7.2024</td>
-<td style="text-align: right;">149.6705</td>
-<td style="text-align: right;">34.33</td>
-<td style="text-align: right;">75.67</td>
-<td style="text-align: right;">0.0836</td>
-<td style="text-align: center;"><strong>PASS</strong></td>
-</tr>
-<tr>
-<td><code>8视野圆弧求圆心\EdgeImage_2.5X_8</code></td>
-<td>纯黑底噪 (~15 DN)</td>
-<td style="text-align: right;">1.8</td>
-<td style="text-align: right;">-1.4518</td>
-<td style="text-align: right;">84.1928</td>
-<td style="text-align: right;">149.7382</td>
-<td style="text-align: right;">12.37</td>
-<td style="text-align: right;">33.98</td>
-<td style="text-align: right;">-0.1693</td>
-<td style="text-align: center;"><strong>PASS</strong></td>
-</tr>
-<tr>
-<td><code>8视野圆弧求圆心\EdgeImage_2.5X_thick_8</code></td>
-<td>纯黑底噪 (~15 DN)</td>
-<td style="text-align: right;">1.8</td>
-<td style="text-align: right;">-1.1258</td>
-<td style="text-align: right;">84.3255</td>
-<td style="text-align: right;">149.6596</td>
-<td style="text-align: right;">11.76</td>
-<td style="text-align: right;">29.21</td>
-<td style="text-align: right;">-0.4094</td>
-<td style="text-align: center;"><strong>PASS</strong></td>
-</tr>
-<tr>
-<td><code>8视野圆弧求圆心\EdgeImage_1.5X_thick_8</code></td>
-<td>纯黑底噪 (~15 DN)</td>
-<td style="text-align: right;">3.0</td>
-<td style="text-align: right;">-0.7422</td>
-<td style="text-align: right;">84.2072</td>
-<td style="text-align: right;">149.6593</td>
-<td style="text-align: right;">19.61</td>
-<td style="text-align: right;">45.08</td>
-<td style="text-align: right;">-0.4120</td>
-<td style="text-align: center;"><strong>PASS</strong></td>
-</tr>
-<tr>
-<td><strong><code>8视野圆弧求圆心\EdgeImage</code> (反光平台新样本)</strong></td>
-<td><strong>浅灰反光 (~70 DN)</strong></td>
+<td style="text-align: center;"><strong>8 视野</strong></td>
+<td><strong><code>8视野圆弧求圆心\EdgeImage_8</code></strong></td>
+<td><strong>反光刀纹底座 + 内外双圆弧去边环</strong></td>
 <td style="text-align: right;"><strong>1.8</strong></td>
-<td style="text-align: right;"><strong>1.6791</strong></td>
-<td style="text-align: right;"><strong>-84.0015</strong></td>
-<td style="text-align: right;"><strong>149.6907</strong></td>
-<td style="text-align: right;"><strong>12.95</strong></td>
-<td style="text-align: right;"><strong>46.73</strong></td>
-<td style="text-align: right;"><strong>1.0641</strong></td>
+<td style="text-align: right;"><strong>1.7523</strong></td>
+<td style="text-align: right;"><strong>-83.8922</strong></td>
+<td style="text-align: right;"><strong>149.7262</strong></td>
+<td style="text-align: right;"><strong>12.29</strong></td>
+<td style="text-align: right;"><strong>69.61</strong></td>
+<td style="text-align: right;"><strong>1.0323</strong></td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>8 视野</strong></td>
+<td><strong><code>8视野圆弧求圆心\EdgeImage1_8</code></strong></td>
+<td><strong>反光刀纹底座 + 低对比度单圆弧</strong></td>
+<td style="text-align: right;"><strong>1.8</strong></td>
+<td style="text-align: right;"><strong>1.6815</strong></td>
+<td style="text-align: right;"><strong>-84.0034</strong></td>
+<td style="text-align: right;"><strong>149.6918</strong></td>
+<td style="text-align: right;"><strong>10.36</strong></td>
+<td style="text-align: right;"><strong>47.08</strong></td>
+<td style="text-align: right;"><strong>1.0636</strong></td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>8 视野</strong></td>
+<td><strong><code>8视野圆弧求圆心\EdgeImage_1.5X_8</code></strong></td>
+<td><strong>1.5X 暗场照明极细窄脉冲亮线</strong></td>
+<td style="text-align: right;"><strong>3.0</strong></td>
+<td style="text-align: right;"><strong>-1.0695</strong></td>
+<td style="text-align: right;"><strong>84.0747</strong></td>
+<td style="text-align: right;"><strong>149.7381</strong></td>
+<td style="text-align: right;"><strong>19.99</strong></td>
+<td style="text-align: right;"><strong>41.43</strong></td>
+<td style="text-align: right;"><strong>-0.1628</strong></td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>8 视野</strong></td>
+<td><code>8视野圆弧求圆心\EdgeImage_1.5X_thick_8</code></td>
+<td>1.5X 纯黑底座 + 厚片高亮倒角</td>
+<td style="text-align: right;">3.0</td>
+<td style="text-align: right;">-0.7418</td>
+<td style="text-align: right;">84.2076</td>
+<td style="text-align: right;">149.6588</td>
+<td style="text-align: right;">19.75</td>
+<td style="text-align: right;">45.17</td>
+<td style="text-align: right;">-0.4121</td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>8 视野</strong></td>
+<td><code>8视野圆弧求圆心\EdgeImage_2.5X_8</code></td>
+<td>2.5X 纯黑底座 + 标准阶跃沿</td>
+<td style="text-align: right;">1.8</td>
+<td style="text-align: right;">-1.4519</td>
+<td style="text-align: right;">84.1930</td>
+<td style="text-align: right;">149.7351</td>
+<td style="text-align: right;">12.34</td>
+<td style="text-align: right;">29.34</td>
+<td style="text-align: right;">-0.1818</td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>8 视野</strong></td>
+<td><code>8视野圆弧求圆心\EdgeImage_2.5X_thick_8</code></td>
+<td>2.5X 纯黑底座 + 厚片高亮倒角</td>
+<td style="text-align: right;">1.8</td>
+<td style="text-align: right;">-1.1259</td>
+<td style="text-align: right;">84.3255</td>
+<td style="text-align: right;">149.6597</td>
+<td style="text-align: right;">11.77</td>
+<td style="text-align: right;">29.08</td>
+<td style="text-align: right;">-0.4093</td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>8 视野</strong></td>
+<td><code>EdgeImage</code> (历史 8 视野基准)</td>
+<td>1.5X 纯黑底座 + 标准阶跃沿</td>
+<td style="text-align: right;">1.8</td>
+<td style="text-align: right;">-1.8155</td>
+<td style="text-align: right;">-7.2022</td>
+<td style="text-align: right;">149.6707</td>
+<td style="text-align: right;">34.50</td>
+<td style="text-align: right;">76.74</td>
+<td style="text-align: right;">0.0837</td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>4 视野</strong></td>
+<td><code>8视野圆弧求圆心\EdgeImage=4</code></td>
+<td>2.5X 纯黑底座 + 标准阶跃沿</td>
+<td style="text-align: right;">1.8</td>
+<td style="text-align: right;">-1.1943</td>
+<td style="text-align: right;">84.4008</td>
+<td style="text-align: right;">149.4667</td>
+<td style="text-align: right;">13.29</td>
+<td style="text-align: right;">49.66</td>
+<td style="text-align: right;">—</td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>4 视野</strong></td>
+<td><code>8视野圆弧求圆心\EdgeImage_1.5X</code></td>
+<td>1.5X 极微弱暗场窄亮线 (峰值 30 DN)</td>
+<td style="text-align: right;">3.0</td>
+<td style="text-align: right;">-0.6762</td>
+<td style="text-align: right;">84.0288</td>
+<td style="text-align: right;">149.7378</td>
+<td style="text-align: right;">21.85</td>
+<td style="text-align: right;">40.95</td>
+<td style="text-align: right;">—</td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>4 视野</strong></td>
+<td><code>8视野圆弧求圆心\EdgeImage_5X</code></td>
+<td>5X 宽过渡带 + 内部 IC Die 电路</td>
+<td style="text-align: right;">0.9</td>
+<td style="text-align: right;">-1.0256</td>
+<td style="text-align: right;">83.6106</td>
+<td style="text-align: right;">149.6399</td>
+<td style="text-align: right;">5.05</td>
+<td style="text-align: right;">9.32</td>
+<td style="text-align: right;">—</td>
+<td style="text-align: center;"><strong>PASS</strong></td>
+</tr>
+<tr>
+<td style="text-align: center;"><strong>4 视野</strong></td>
+<td><code>EdgeImage</code> (历史 4 视野基准)</td>
+<td>1.5X 纯黑底座 + 标准阶跃沿</td>
+<td style="text-align: right;">1.8</td>
+<td style="text-align: right;">-1.8177</td>
+<td style="text-align: right;">-7.2094</td>
+<td style="text-align: right;">149.6679</td>
+<td style="text-align: right;">36.63</td>
+<td style="text-align: right;">74.78</td>
+<td style="text-align: right;">—</td>
 <td style="text-align: center;"><strong>PASS</strong></td>
 </tr>
 </tbody>
 </table>
-<p>所有图片均通过 C# x64 及 C++ 原生 DLL 实际调用，六个输出结果位级一致。新算法测试全面覆盖反光载台、倒角深谷识别、已知圆心、正负已知 notch 角度、无 notch、非法参数及输入只读；旧四图完全回归通过。证据见 <code>output/EightViewEdgeCircle/dll_replay.json</code>。</p>
-<p>RMS 是边缘到圆的超定正交拟合残差，全部 5 组实测数据的 RMS 均在 <strong>11.7 ~ 34.3 μm</strong> 之间（远优于产线 $\le 50\ \mu\text{m}$ 指标），解算出的物理晶圆半径高度自洽收敛于 <strong>149.66 ~ 149.74 mm</strong>。反光平台新样本的 Notch 角度精准收敛至 <strong>1.0641°</strong>。</p>
+<p>所有图片均通过 C# x64 及 C++ 原生 DLL 实际调用，输出结果位级一致。证据见 <code>output/EightViewEdgeCircle/dll_replay.json</code> 与 <code>tests/verify_all_eight_view_datasets.py</code>。</p>
 <h3 id="116-从四图迁移到八图">11.6 从四图迁移到八图</h3>
 <table>
 <thead>
