@@ -11,7 +11,13 @@ struct LineCandidate {
     cv::Vec4f fit_line;
     cv::Point2d center;
     double angle_degrees = 0.0;
-    double weight = 0.0;
+    double center_y = 0.0;
+    double score = 0.0;
+    double contrast = 0.0;
+    double rmse = 0.0;
+    int width = 0;
+    int height = 0;
+    int area = 0;
     cv::Rect bounding_box;
 };
 
@@ -62,21 +68,73 @@ Status LineAngleModule::extractLineInfo(
         return Status::Error(ErrorCode::ImageFormatMismatch, "仅支持 CV_8UC1 图像");
     }
 
+    const int h = mono8.rows;
+    const int w = mono8.cols;
+    const double center_u = w / 2.0;
+
+    // 1. 垂直方向一维自适应背景估计与高通滤波 (消除纵向暗角与背景渐晕)
+    const int kh = std::max(15, std::min(65, (h / 60) | 1));
+    cv::Mat bg_v;
+    cv::boxFilter(mono8, bg_v, CV_32F, cv::Size(1, kh));
+
+    cv::Mat mono_f;
+    mono8.convertTo(mono_f, CV_32F);
+
+    cv::Mat abs_diff_f;
+    cv::absdiff(mono_f, bg_v, abs_diff_f);
+
+    cv::Mat abs_diff_u8;
+    abs_diff_f.convertTo(abs_diff_u8, CV_8U);
+
+    // 2. 基于局部垂直噪声自适应计算分割阈值 (兼顾微弱刻槽与高动态白线)
+    int hist[256] = {0};
+    const int total_pixels = w * h;
+    const int sample_step = std::max(1, total_pixels / 500000);
+    int sampled_count = 0;
+    for (int r = 0; r < h; r += sample_step) {
+        const uchar* row_ptr = abs_diff_u8.ptr<uchar>(r);
+        for (int c = 0; c < w; c += sample_step) {
+            hist[row_ptr[c]]++;
+            sampled_count++;
+        }
+    }
+
+    int median_val = 0;
+    int acc = 0;
+    const int half_count = sampled_count / 2;
+    for (int i = 0; i < 256; ++i) {
+        acc += hist[i];
+        if (acc >= half_count) {
+            median_val = i;
+            break;
+        }
+    }
+
+    const double thresh_val = std::max(6.0, std::min(25.0, median_val * 3.0 + 4.0));
     cv::Mat foreground;
-    cv::threshold(mono8, foreground, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+    cv::threshold(abs_diff_u8, foreground, thresh_val, 255.0, cv::THRESH_BINARY);
+
+    // 3. 水平长核形态学闭运算 (连接断裂刻线) 与细碎噪斑开运算
+    const int kw = std::max(25, std::min(75, (w / 50) | 1));
+    cv::morphologyEx(
+        foreground,
+        foreground,
+        cv::MORPH_CLOSE,
+        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kw, 1)));
     cv::morphologyEx(
         foreground,
         foreground,
         cv::MORPH_OPEN,
-        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)));
+        cv::getStructuringElement(cv::MORPH_RECT, cv::Size(11, 2)));
 
+    // 4. 连通域统计与密集骨架点拟合
     cv::Mat labels;
     cv::Mat statistics;
     cv::Mat centroids;
     const int label_count = cv::connectedComponentsWithStats(
         foreground, labels, statistics, centroids, 8, CV_32S);
 
-    const int minimum_width = mono8.cols / 4;
+    const int minimum_width = w / 4;
     std::vector<LineCandidate> candidates;
     std::vector<cv::Rect> discarded_border_regions;
 
@@ -84,29 +142,46 @@ Status LineAngleModule::extractLineInfo(
         const int width = statistics.at<int>(label, cv::CC_STAT_WIDTH);
         const int height = statistics.at<int>(label, cv::CC_STAT_HEIGHT);
         const int area = statistics.at<int>(label, cv::CC_STAT_AREA);
-        if (width < minimum_width || width < height * 3 || area < width * height / 5) {
-            continue;
-        }
-
         const int left = statistics.at<int>(label, cv::CC_STAT_LEFT);
         const int top = statistics.at<int>(label, cv::CC_STAT_TOP);
         const cv::Rect region(left, top, width, height);
-        if (touchesVerticalImageBorder(region, mono8.size())) {
+
+        // 排除触碰垂直上下边界的非标定条斑 (允许贴近左右边缘)
+        if (top == 0 || top + height >= h) {
             discarded_border_regions.push_back(region);
             continue;
         }
 
-        std::vector<cv::Point> points;
-        points.reserve(area);
-        for (int row = top; row < top + height; ++row) {
-            const int* label_row = labels.ptr<int>(row) + left;
-            for (int column = 0; column < width; ++column) {
-                if (label_row[column] == label) {
-                    points.emplace_back(left + column, row);
+        // 几何长宽比与最小宽度约束
+        if (width < minimum_width || width < height * 2) {
+            continue;
+        }
+
+        // 密集骨架提取：沿 X 轴步进采样连通域每列的平均 Y 坐标
+        const int col_step = std::max(1, width / 300);
+        std::vector<cv::Point2f> points;
+        points.reserve(width / col_step + 4);
+
+        double total_diff_sum = 0.0;
+        int diff_pixel_count = 0;
+
+        for (int c = left; c < left + width; c += col_step) {
+            double y_sum = 0.0;
+            int count_in_col = 0;
+            for (int r = top; r < top + height; ++r) {
+                if (labels.at<int>(r, c) == label) {
+                    y_sum += r;
+                    count_in_col++;
+                    total_diff_sum += abs_diff_u8.at<uchar>(r, c);
+                    diff_pixel_count++;
                 }
             }
+            if (count_in_col > 0) {
+                points.emplace_back(static_cast<float>(c), static_cast<float>(y_sum / count_in_col));
+            }
         }
-        if (points.size() < 2) {
+
+        if (points.size() < 10) {
             continue;
         }
 
@@ -114,11 +189,40 @@ Status LineAngleModule::extractLineInfo(
         cv::fitLine(points, fitted_line, cv::DIST_L2, 0.0, 0.01, 0.01);
         const double candidate_angle = normalizeLineAngle(
             std::atan2(fitted_line[1], fitted_line[0]) * 180.0 / CV_PI);
+
+        // 过滤非近水平线 (|angle| > 15 度)
+        if (std::abs(candidate_angle) > 15.0) {
+            continue;
+        }
+
+        // 计算拟合残差 RMSE
+        double sum_sq_err = 0.0;
+        for (const auto& pt : points) {
+            const double res = -fitted_line[1] * (pt.x - fitted_line[2]) + fitted_line[0] * (pt.y - fitted_line[3]);
+            sum_sq_err += res * res;
+        }
+        const double rmse = std::sqrt(sum_sq_err / points.size());
+
+        // 计算在中心 u = w / 2.0 处的亚像素 Y 坐标
+        const double slope = (std::abs(fitted_line[0]) > 1e-6) ? (fitted_line[1] / fitted_line[0]) : 0.0;
+        const double center_v = fitted_line[3] + (center_u - fitted_line[2]) * slope;
+
+        // 计算平均对比度与显著性综合打分
+        const double mean_contrast = (diff_pixel_count > 0) ? (total_diff_sum / diff_pixel_count) : 10.0;
+        const double score = static_cast<double>(width) * std::sqrt(mean_contrast) *
+                             std::sqrt(static_cast<double>(area) / width) / (1.0 + rmse);
+
         candidates.push_back({
             fitted_line,
             cv::Point2d(fitted_line[2], fitted_line[3]),
             candidate_angle,
-            static_cast<double>(width),
+            center_v,
+            score,
+            mean_contrast,
+            rmse,
+            width,
+            height,
+            area,
             region});
     }
 
@@ -126,61 +230,134 @@ Status LineAngleModule::extractLineInfo(
         return Status::Error(ErrorCode::FeatureNotFound, "未找到足够长的水平标定线");
     }
 
+    // 5. 候选线垂直位置分层聚类 (将同一条带的上下边缘归入同一组)
+    const double max_band_dist = std::max(50.0, h * 0.08);
+    std::sort(candidates.begin(), candidates.end(), [](const LineCandidate& a, const LineCandidate& b) {
+        return a.center_y < b.center_y;
+    });
+
+    std::vector<std::vector<LineCandidate>> clusters;
+    for (const auto& cand : candidates) {
+        bool added = false;
+        for (auto& cluster : clusters) {
+            double avg_y = 0.0;
+            double avg_ang = 0.0;
+            for (const auto& item : cluster) {
+                avg_y += item.center_y;
+                avg_ang += item.angle_degrees;
+            }
+            avg_y /= cluster.size();
+            avg_ang /= cluster.size();
+
+            if (std::abs(cand.center_y - avg_y) < max_band_dist &&
+                std::abs(cand.angle_degrees - avg_ang) < 0.8) {
+                cluster.push_back(cand);
+                added = true;
+                break;
+            }
+        }
+        if (!added) {
+            clusters.push_back({cand});
+        }
+    }
+
+    // 6. 优选总得分最高的标定线集群 (成对伴随边缘集群具有更高结构置信度)
+    int best_cluster_idx = 0;
+    double max_cluster_score = -1.0;
+    for (size_t i = 0; i < clusters.size(); ++i) {
+        double total_score = 0.0;
+        for (const auto& item : clusters[i]) {
+            total_score += item.score;
+        }
+        if (clusters[i].size() >= 2) {
+            total_score *= 1.2;
+        }
+        if (total_score > max_cluster_score) {
+            max_cluster_score = total_score;
+            best_cluster_idx = static_cast<int>(i);
+        }
+    }
+
+    const auto& best_cluster = clusters[best_cluster_idx];
+
+    // 7. 双倍角融合计算主方向角，并计算对称物理中轴中心高度
     double weighted_cosine = 0.0;
     double weighted_sine = 0.0;
-    cv::Point2d weighted_center(0.0, 0.0);
     double total_weight = 0.0;
-    cv::Rect union_box = candidates[0].bounding_box;
+    cv::Rect union_box = best_cluster[0].bounding_box;
 
-    for (const LineCandidate& candidate : candidates) {
-        const double double_angle_radians = candidate.angle_degrees * 2.0 * CV_PI / 180.0;
-        weighted_cosine += candidate.weight * std::cos(double_angle_radians);
-        weighted_sine += candidate.weight * std::sin(double_angle_radians);
-        weighted_center += candidate.weight * candidate.center;
-        total_weight += candidate.weight;
-        union_box |= candidate.bounding_box;
+    double min_center_y = best_cluster[0].center_y;
+    double max_center_y = best_cluster[0].center_y;
+
+    for (const auto& item : best_cluster) {
+        const double double_angle_radians = item.angle_degrees * 2.0 * CV_PI / 180.0;
+        weighted_cosine += item.score * std::cos(double_angle_radians);
+        weighted_sine += item.score * std::sin(double_angle_radians);
+        total_weight += item.score;
+        union_box |= item.bounding_box;
+
+        min_center_y = std::min(min_center_y, item.center_y);
+        max_center_y = std::max(max_center_y, item.center_y);
     }
 
     const double angle_degrees = normalizeLineAngle(
         std::atan2(weighted_sine, weighted_cosine) * 90.0 / CV_PI);
-    weighted_center *= (1.0 / total_weight);
+
+    // 对称几何中轴合成：若存在上下成对伴随边缘，取上下边缘算术对称中点
+    double center_v = 0.0;
+    if (best_cluster.size() >= 2 && (max_center_y - min_center_y) > 15.0) {
+        center_v = 0.5 * (min_center_y + max_center_y);
+    } else {
+        double weighted_y_sum = 0.0;
+        for (const auto& item : best_cluster) {
+            weighted_y_sum += item.score * item.center_y;
+        }
+        center_v = (total_weight > 0.0) ? (weighted_y_sum / total_weight) : min_center_y;
+    }
 
     const double angle_radians = angle_degrees * CV_PI / 180.0;
     const cv::Point2d line_dir(std::cos(angle_radians), std::sin(angle_radians));
-
-    // 计算中心坚线 u = width / 2.0 处的亚像素 Y 坐标
-    const double center_u = mono8.cols / 2.0;
-    const double slope = (std::abs(line_dir.x) > 1e-6) ? (line_dir.y / line_dir.x) : 0.0;
-    const double center_v = weighted_center.y + (center_u - weighted_center.x) * slope;
+    const cv::Point2d fused_center(center_u, center_v);
 
     out_info.angle_degrees = angle_degrees;
     out_info.center_y = center_v;
-    out_info.line_center = weighted_center;
+    out_info.line_center = fused_center;
     out_info.line_direction = line_dir;
     out_info.bounding_box = union_box;
     out_info.detected = true;
 
+    // 8. 诊断大图生成
     if (result_bgr != nullptr) {
         cv::cvtColor(mono8, *result_bgr, cv::COLOR_GRAY2BGR);
         for (const cv::Rect& region : discarded_border_regions) {
             cv::rectangle(*result_bgr, region, cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
         }
         for (const LineCandidate& candidate : candidates) {
-            drawFittedLine(*result_bgr, candidate, cv::Scalar(0, 255, 0), 1);
+            drawFittedLine(*result_bgr, candidate, cv::Scalar(80, 160, 80), 1);
+        }
+        for (const LineCandidate& candidate : best_cluster) {
+            drawFittedLine(*result_bgr, candidate, cv::Scalar(0, 255, 0), 2);
         }
         const LineCandidate fused_line{
             cv::Vec4f(static_cast<float>(line_dir.x), static_cast<float>(line_dir.y),
-                      static_cast<float>(weighted_center.x), static_cast<float>(weighted_center.y)),
-            weighted_center,
+                      static_cast<float>(fused_center.x), static_cast<float>(fused_center.y)),
+            fused_center,
             angle_degrees,
+            center_v,
             1.0,
+            0.0,
+            0.0,
+            union_box.width,
+            union_box.height,
+            union_box.area(),
             union_box};
         drawFittedLine(*result_bgr, fused_line, cv::Scalar(0, 255, 255), 2);
 
         // 绘制中心测点准星
         cv::drawMarker(*result_bgr, cv::Point(static_cast<int>(std::round(center_u)), static_cast<int>(std::round(center_v))),
                        cv::Scalar(0, 0, 255), cv::MARKER_CROSS, 40, 2, cv::LINE_AA);
-        cv::putText(*result_bgr, cv::format("angle=%.4f deg, v_center=%.2f px", angle_degrees, center_v),
+        cv::putText(*result_bgr, cv::format("angle=%.4f deg, v_center=%.2f px [cluster=%zu]",
+                                           angle_degrees, center_v, best_cluster.size()),
                     cv::Point(30, 50), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
     }
 
