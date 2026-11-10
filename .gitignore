@@ -34,6 +34,7 @@ Makefile
 .idea/
 *.user
 *.suo
+*.aps
 
 # 大型测试图像与临时生成物
 tmp/
@@ -43,13 +44,23 @@ tools/*.bmp
 tools/*.png
 tools/*.jpg
 *.bmp
+output_*.jpg
+output_*.png
+*_diagnostic_*.jpg
+*_preview.jpg
+*_diag.jpg
 
-# Python 缓存
+# Python 缓存与虚拟环境
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.pyd
+.venv/
+venv/
+env/
 
-# 操作系统缓存
-Thumbs.db
-Desktop.ini
-.DS_Store
+# 智能体开发目录
+.agents/
+.codex/
+.superpowers/
+scratch/
