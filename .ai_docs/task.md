@@ -1,24 +1,21 @@
-# 任务清单：水平标定线角度检测算法兼容性与鲁棒性全面重构
+# 任务清单：5X 畸变标定与 MyImage/MyImage1 独立实测验证
 
-- [x] **阶段 1：特征机理诊断与根因剖析**
-  - [x] 解析 `C:\Users\HYC\Desktop\CameraAjustCalibration` 目录下 `Mark_1.bmp`, `Mark_2.bmp`, `Mark_3.bmp` 及历史实测图、合成图的视觉特征
-  - [x] 查明旧算法失效根因：单一反向 Otsu 假设、缺乏空间方向性滤波、暗角与背景漂移吞没弱特征、连通域筛选条件僵化
-  - [x] 确定新算法多模态检测架构（双极性垂直高通滤波 + 水平方向性连通聚合 + 密集亚像素直线拟合 + 物理条带对称中轴与主聚类优选）
+- [x] **阶段 1：数据集特征探查与机理分析**
+  - [x] 解析 `C:\Users\HYC\Desktop\畸变验证` 下 7 张 4096×4096 图像的灰度与几何特征
+  - [x] 确认点阵类型：10×10 大圆点阵（含 1 个中心对角特征点，共 101 点），白圆高亮（灰度 95~115 或 190~240，背景 81 或 175），5X 下间距 pitch 约 333.3 像素
+  - [x] 确认 5 视野空间拓扑：`Mark__5X_0` 为中心视野，1/2/3/4 分别对应左下、左上、右上、右下 4 个角视野（平移步距约 500 px）
+  - [x] 确认独立测试集：`MyImage.bmp` 与 `MyImage1.bmp` 为独立机位拍摄的点阵测试图
 
-- [x] **阶段 2：算法原型设计与交叉全量验证**
-  - [x] Python 原型设计并验证垂直一维高通滤波（`boxFilter(1, K)` 消除背景漂移）
-  - [x] 验证水平闭运算在弱刻痕/断续线上的长程连接性能
-  - [x] 验证多候选线垂直位置聚类与宽条带上下伴随边缘的无偏中轴对称合成
-  - [x] 全样本验证：历史合成用例（1/2/3）、实测用例（`角度调整1/2.bmp`）、新样本（`Mark_1/2/3.bmp`）100% 检出且高精度契合
+- [x] **阶段 2：全自动高精度畸变标定**
+  - [x] 执行单视野畸变标定（基于 `Mark__5X_0.bmp`）：成功提取 100 点，标定拟合 RMS = 0.0913 像素
+  - [x] 执行 5 视野多视场联合标定（基于 `Mark__5X_0` ~ `Mark__5X_4`）：成功提取 500 点，全局拟合 RMS = 0.1792 像素
 
-- [x] **阶段 3：C++ SDK 核心实现与工程重构**
-  - [x] 重构 `src/modules/line_angle.cpp` 中的 `LineAngleModule::extractLineInfo`
-  - [x] 严格遵守 K&R 风格、4 空格缩进与简体中文注释规范
-  - [x] 重新编译 `WaferCalibSDK.dll`、`test_line_angle.exe`、`test_two_view_line_angle.exe`
+- [x] **阶段 3：独立测试集校正与亚像素高精几何评估**
+  - [x] 调用 `Wafer_CorrectImageByDotGridTemplate` 对 `MyImage.bmp` 和 `MyImage1.bmp` 进行单视野与 5 视野校正
+  - [x] 提取矫正前 vs 矫正后各点的高精度亚像素灰度质心坐标（10×10 网格拓扑匹配）
+  - [x] 计算行直线度、列直线度、综合直线度、2D 仿射网格非线性残差等核心指标
+  - [x] 计算畸变改善率（Improvement Rate %）
 
-- [x] **阶段 4：回归测试、全量验证与文档归档**
-  - [x] 运行 `test_line_angle.exe` 验证单视野单图及贴边图测试 100% PASS
-  - [x] 运行 `test_two_view_line_angle.exe` 验证双视野大基线标定测试 100% PASS
-  - [x] 编写并执行针对 `CameraAjustCalibration` 目录的 C API 全功能自动化测试（全部 100% 成功，单帧约 108ms）
-  - [x] 更新 `docs/CHANGELOG.md` 及 `docs/WaferCalibSDK_C_API调用说明.md`
-  - [x] 汇总测试报告与交付说明
+- [x] **阶段 4：图表可视化与报告输出**
+  - [x] 生成 Quiver 畸变位移矢量场放大 300x 对比图（`distortion_comparison_MyImage.png`, `distortion_comparison_MyImage1.png`）
+  - [x] 整理输出完整量化评测对比数据与结论报告
