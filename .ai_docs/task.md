@@ -18,4 +18,11 @@
 
 - [x] **阶段 4：图表可视化与报告输出**
   - [x] 生成 Quiver 畸变位移矢量场放大 300x 对比图（`distortion_comparison_MyImage.png`, `distortion_comparison_MyImage1.png`）
-  - [x] 整理输出完整量化评测对比数据与结论报告
+  - [x] 导出全分辨率 4096×4096 校正图像至 `C:\Users\HYC\Desktop\畸变验证`
+
+- [x] **阶段 5：旋转调平（Rotation Leveling）与正交对齐**
+  - [x] 解析去畸变后图像的点阵主轴旋转角（实测倾角为 -0.1477° ~ -0.1480°，4096px 跨度落差约 10.56 px）
+  - [x] 执行高精度仿射双三次插值旋转调平算法，彻底消除相机/标定板安装偏角
+  - [x] 验证调平后图像：网格行水平残差仅 0.0011°（落差降至 0.078 px，实现完美水平正交）
+  - [x] 导出全分辨率 4096×4096 BMP 调平图像至 `C:\Users\HYC\Desktop\畸变验证`（`MyImage_leveled.bmp`, `MyImage1_leveled.bmp`, `Mark__5X_0_leveled.bmp` 及单视场版本）
+  - [x] 生成旋转调平对比图：`.ai_docs/distortion_leveling_comparison.png`
