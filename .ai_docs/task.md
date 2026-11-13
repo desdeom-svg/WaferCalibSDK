@@ -1,4 +1,4 @@
-# 任务清单：5X 畸变标定与 MyImage/MyImage1 独立实测验证
+# 任务清单：5X 畸变标定与 MyImage/MyImage1/MyImage2 独立实测验证
 
 - [x] **阶段 1：数据集特征探查与机理分析**
   - [x] 解析 `C:\Users\HYC\Desktop\畸变验证` 下 7 张 4096×4096 图像的灰度与几何特征
@@ -26,3 +26,10 @@
   - [x] 验证调平后图像：网格行水平残差仅 0.0011°（落差降至 0.078 px，实现完美水平正交）
   - [x] 导出全分辨率 4096×4096 BMP 调平图像至 `C:\Users\HYC\Desktop\畸变验证`（`MyImage_leveled.bmp`, `MyImage1_leveled.bmp`, `Mark__5X_0_leveled.bmp` 及单视场版本）
   - [x] 生成旋转调平对比图：`.ai_docs/distortion_leveling_comparison.png`
+
+- [x] **阶段 6：真实晶圆划片槽边缘直线度畸变验证（MyImage2.bmp）**
+  - [x] 探查 `MyImage2.bmp` 划片槽结构：精确锁定外侧线（顶部 Y~62、左侧 X~64）与内侧线（顶部 Y~140、左侧 X~142）
+  - [x] 调用 5X 畸变标定模型对 `MyImage2.bmp` 完成全分辨率 4096×4096 矫正，并输出至桌面：`MyImage2_corrected_multi.bmp`、`MyImage2_corrected_single.bmp`
+  - [x] 沿 3700 像素大跨度进行高密度亚像素边缘提取与 PCA 正交回归拟合
+  - [x] 严谨量化各项直线度指标：顶部水平线光学二次弯曲弓高从 0.621 px 降至 0.170~0.415 px（改善率达 33.2% ~ 72.6%），直线度 RMS 降至 0.477~0.510 px
+  - [x] 生成高分辨率残差分布曲线与二次弯曲趋势图：`.ai_docs/MyImage2_straightness_comparison.png`
